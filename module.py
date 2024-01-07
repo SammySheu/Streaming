@@ -53,6 +53,7 @@ class Streaming():
         self.data_streaming = queue.Queue()
         self.run_command: Callable = None
         self.subscribe_topics: str = "ResolvedChannel"
+        self.consumers: set = set()
         # Class init with redis and consumer group
         self.__init_redis()
         self.__create_xgroup(user)
@@ -119,9 +120,11 @@ class Streaming():
                 for _d in _data_list:
                     _d["token"] = self.build_token()
                     self.command_token.add(_d["token"])
-                self.exec_cmd(cmd_package_list=_data_list)
-                # print("data_received_from_queue")
-
+                try:
+                    self.exec_cmd(cmd_package_list=_data_list)
+                    # print("data_received_from_queue")
+                except:
+                    pass
     def __build_working_thread(self):
         self.working_thread = RestartableThread(target=self.process_queuing_data, args=(self.data_streaming, ))
         self.working_thread.start()
@@ -173,7 +176,11 @@ class Streaming():
         except TypeError:
             traceback.print_exc()
 
-
+    def look_up_consumers(self):
+        groups = self.redis_server.xinfo_consumers(self.channel_name, self.user)
+        for _c in groups:
+            self.consumers.add(_c.get("name").decode())
+    
     def stream_connect(self, consumer_group: str, consumer: str, block: bool = False):
         # Once get the message, back to the starting point to read message
         while True:
@@ -193,7 +200,8 @@ class Streaming():
 
 if __name__ == "__main__":
     cb = Streaming(user="CG", redis_host="127.0.0.1", redis_port=6379, redis_db=13, channel_name="NCB")
-    cb.stream_connect(consumer_group="CG", consumer=f"CG_{cb.pid}", block=True)
+    # cb.stream_connect(consumer_group="CG", consumer=f"CG_{cb.pid}", block=True)
+    cb.look_up_consumers()
     
 
     # cb = Streaming(user="CG", redis_host="127.0.0.1", redis_port=6379, redis_db=13, channel_name="NCB")

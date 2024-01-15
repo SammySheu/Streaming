@@ -7,11 +7,11 @@ from multithread import RestartableThread
 from typing import Callable
 from redis.client import PubSub
 from schemas import CommandPackage
+from encryption import Encryption
 import queue
 import os
-import base64
-import hmac
-import hashlib
+
+
 
 def redis_xread_to_python(data) -> list:
     channel_name, _dl = data[0]
@@ -25,8 +25,15 @@ def redis_xread_to_python(data) -> list:
 
 def redis_subscribe_to_python(data):
     data = json.loads(data["data"].decode())
-    data["data"] = json.loads(data["data"])
+    # data["data"] = json.loads(data["data"])
     return data
+
+def redis_xrange_to_python(data):
+    channel_name, _dl = data[0]
+    result = []
+    _temp = {k.decode(): v.decode() for k, v in _dl.items()}
+    result.append(_temp)
+    return result
 
 class Streaming():
     '''
@@ -53,7 +60,14 @@ class Streaming():
         self.data_streaming = queue.Queue()
         self.run_command: Callable = None
         self.subscribe_topics: str = "ResolvedChannel"
-        self.consumers: set = set()
+        self.consumers: dict = {}
+        '''
+        {
+            consumer: {
+                pending: int
+            }
+        }
+        '''
         # Class init with redis and consumer group
         self.__init_redis()
         self.__create_xgroup(user)
@@ -70,32 +84,6 @@ class Streaming():
             except Exception:
                 pass
     
-    def __b64_encode_decode(self, target: str or bytes, command: str or list, en_de: bool = False) -> str:
-        run_dict = {
-            "85": [base64.b85encode, base64.b85decode],
-            "64": [base64.b64encode, base64.b64decode],
-            "32": [base64.b32encode, base64.b32decode],
-            "16": [base64.b16encode, base64.b16decode],
-        }
-
-        if isinstance(target, str):
-            target = bytes(target, "utf-8")
-        if isinstance(command, list):
-            for i in command:
-                target = self.__b64_encode_decode(target, i, en_de)
-        else:
-            if isinstance(command, (int, float)):
-                command = str(command).split(".")[0]
-            if command not in run_dict.keys():
-                return target
-
-            target = run_dict[command][en_de](target)
-
-        if isinstance(target, bytes):
-            target = target.decode("utf-8")
-
-        return target
-
     def add_message(self, message: dict) -> None:
         self.redis_server.xadd(name=self.channel_name, fields=message)
     
@@ -118,7 +106,7 @@ class Streaming():
                     (Store in self.command)
                 '''
                 for _d in _data_list:
-                    _d["token"] = self.build_token()
+                    _d["token"] = Encryption.build_token()
                     self.command_token.add(_d["token"])
                 try:
                     self.exec_cmd(cmd_package_list=_data_list)
@@ -133,23 +121,6 @@ class Streaming():
         _redis_instance = self.redis_server.pubsub()
         _redis_instance.subscribe(topics)
         return _redis_instance
-    
-    def __bs_hmc_encode(self, password: str, sk: str) -> str:
-        sk = bytes(sk, 'utf-8')
-        password = bytes(password, 'utf-8')
-        signature_hash = hmac.new(sk, password, digestmod=hashlib.sha256).digest()
-        signature = base64.b64encode(signature_hash).decode()
-        return signature
-
-    def __token_generator(self, account: str, password: str, sk: str) -> str:
-        signature = self.__bs_hmc_encode(password, sk)
-        token = "{},{},{}".format(signature, account, time.time() + 300)
-        token = self.__b64_encode_decode(target=token, command=[85, 64])
-        return token
-
-    def build_token(self) -> str:
-        result = self.__token_generator("NormalTA", "0", str(time.time()))
-        return result
 
     def pubsub_listening(self, pubsub: PubSub):
         for i in pubsub.listen():
@@ -176,13 +147,52 @@ class Streaming():
         except TypeError:
             traceback.print_exc()
 
+    def read_data_in_stream(self, stream_id: str):
+        data = self.redis_server.xrange(self.channel_name, min=stream_id, max=stream_id)
+        return redis_xrange_to_python(data)
+
+    def read_pending_list(self):
+        self.myself = "CG_2329509"
+        pending_list = self.redis_server.xpending_range(
+            name=self.channel_name,
+            groupname=self.user,
+            min="-",
+            max="+",
+            count=1000)
+        for pending_info in pending_list:
+            if pending_info["consumer"] != self.myself.encode() and pending_info["time_since_delivered"] > 3000:
+                data = self.read_data_in_stream(pending_info["message_id"].decode())
+                for _d in data:
+                    _d["id"] = pending_info["message_id"].decode()
+                    _d["token"] = Encryption.build_token()
+                    self.command_token.add(_d["token"])
+                try:
+                    self.exec_cmd(cmd_package_list=data)
+                    # print("data_received_from_queue")
+                except:
+                    pass
+
+        # consumers_info = self.redis_server.xpending(self.channel_name, self.user)
+        # for c_info in consumers_info["consumers"]:
+        #     c_info["name"]
+        # for i in pending_list["consumers"]:
+        #     self.consumers[i["name"].decode()]["pending"] = i["pending"]
+        # pending_list = self.redis_server.xpending_range(
+        #     name=self.channel_name,
+        #     groupname=self.user,
+        #     consumername="CG_2319145",
+        #     min="-",
+        #     max="+",
+        #     count=10)
+    def message_claim():
+        pass
+
     def look_up_consumers(self):
         groups = self.redis_server.xinfo_consumers(self.channel_name, self.user)
         for _c in groups:
-            self.consumers.add(_c.get("name").decode())
+            self.consumers[_c.get("name").decode()] = {}
     
-    def stream_connect(self, consumer_group: str, consumer: str, block: bool = False):
-        # Once get the message, back to the starting point to read message
+    def stream_listening(self, consumer_group: str, consumer: str, block: bool = False):
         while True:
             data = self.redis_server.xreadgroup(
                 groupname=consumer_group,
@@ -191,17 +201,24 @@ class Streaming():
                     self.channel_name: ">"
                 },
                 block=0 if block else None)
-            result = redis_xread_to_python(data)
-            self.put_message_to_working_thread(result)
+            if data:
+                result = redis_xread_to_python(data)
+                self.put_message_to_working_thread(result)
             # Main process and working thread share the same memory(self.data_streaming)
-            
-            # Call command here with async
-            # Async function should be wrapped in __enter__ and __exit__ function()
+
+    def stream_connect(self, consumer_group: str, consumer: str, block: bool = False):
+        self.consumers[consumer] = {}
+        self.myself = consumer
+        # Once get the message, back to the starting point to read message
+        self.main_thread = RestartableThread(target=self.stream_listening, args=(consumer_group, consumer, True))
+        self.main_thread.start()
 
 if __name__ == "__main__":
     cb = Streaming(user="CG", redis_host="127.0.0.1", redis_port=6379, redis_db=13, channel_name="NCB")
+    cb.read_pending_list()
     # cb.stream_connect(consumer_group="CG", consumer=f"CG_{cb.pid}", block=True)
-    cb.look_up_consumers()
+    # print(cb.consumers)
+    # cb.look_up_consumers()
     
 
     # cb = Streaming(user="CG", redis_host="127.0.0.1", redis_port=6379, redis_db=13, channel_name="NCB")

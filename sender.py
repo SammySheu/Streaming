@@ -68,7 +68,7 @@ class Streaming():
             except Exception:
                 pass
     
-    def __b64_encode_decode(self, target: str or bytes, command: str or list, en_de: bool = False) -> str:
+    def __b64_encode_decode(self, target: str | bytes, command: str | list, en_de: bool = False) -> str:
         run_dict = {
             "85": [base64.b85encode, base64.b85decode],
             "64": [base64.b64encode, base64.b64decode],
@@ -114,7 +114,6 @@ class Streaming():
                     (Store in self.command)
                 '''
                 self.exec_cmd(cmd_package_list=_d)
-                # print("data_received_from_queue")
 
     def __build_working_thread(self):
         self.working_thread = RestartableThread(target=self.process_queuing_data, args=(self.data_streaming, ), daemon=True)
@@ -150,20 +149,15 @@ class Streaming():
                     self.count += 1
                     print(self.count)
                     self.message_confirm_and_ack_delete(id=data.get("id"))
-                # print(f"in sub channel: {data}")
 
     def __build_pubsub_thread(self):
         _instance = self.__channel_listening(self.subscribe_topics)
         self.subpub_thread = RestartableThread(target=self.pubsub_listening, args=(_instance, ), daemon=True)
         self.subpub_thread.start()
 
-    def put_message_to_working_thread(self, data: dict) -> None:
+    def put_message_to_working_thread(self, data: list) -> None:
         try:
             self.data_streaming.put(data)
-            # self.job_count += 1
-            # self.run_command(command_script=command, data=_data.dict())
-            # self.redis_stream_ack_and_del(_channel, _id)
-            # self.insert_to_influx_db_for_stream(_data, _id, "finish command", _channel)
         except TypeError:
             traceback.print_exc()
 
@@ -186,11 +180,17 @@ class Streaming():
             # Async function should be wrapped in __enter__ and __exit__ function()
 
 if __name__ == "__main__":
-    cb = Streaming(user="CG", redis_host="127.0.0.1", redis_port=6379, redis_db=13, channel_name="NCB")
+    cb = Streaming(user="Module", redis_host="127.0.0.1", redis_port=6379, redis_db=13, channel_name="NCB")
     from schemas import CommandPackage
     import json
 
-    for i in range(100):
-        _temp = CommandPackage(data=json.dumps({i: "world"}))
+    for i in range(10000):
+        # _temp = CommandPackage(command="IO_intensive_task", data=json.dumps({
+        # _temp = CommandPackage(command="CPU_intensive_task", data=json.dumps({
+        _temp = CommandPackage(command="exec_time_cmd", data=json.dumps({
+            "fibonacci_number": 33, 
+            "input_file": "IO_task_input.txt", 
+            "output_file": "IO_task_output.txt",
+            "timesleep": None
+        }))
         cb.add_message(message=_temp.model_dump())
-        time.sleep(0.1)

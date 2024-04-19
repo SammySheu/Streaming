@@ -2,6 +2,7 @@ import redis
 import traceback
 import time
 import json
+import math
 import random
 from multithread import RestartableThread
 from typing import Callable
@@ -58,13 +59,19 @@ class Streaming():
         self.redis_db = redis_db
         self.channel_name = channel_name # stream in another word
         self.asynchronous = asynchronous 
-        self.count = 0
         self.command_token = set()
         self.data_streaming = queue.Queue()
         self.run_command: Callable = None
         self.subscribe_topics: str = "ResolvedChannel"
+        self.listened = 0
         self.resolved = 0
+        self.processed = 0
+        self.owned_data = 0
+        self.process_time = []
         self.time = int(time.time())
+        print(f"\nDataQueue: {self.owned_data}\n\033[1G\033[2KProcessed Data: {self.processed}\n\033[1G\033[2KResolved Number: {self.resolved}\n\033[1G\033[2KListened Data: {self.listened}", end="", flush=True)
+
+        self.command_function = self.__register_class_method(self)
         # Class init with redis and consumer group
         self.__init_redis()
         self.__create_xgroup(user_module)
@@ -127,8 +134,10 @@ class Streaming():
     def message_confirm_and_ack_delete(self, id: str):
         self.redis_server.xack(self.channel_name, self.group, id)
         self.redis_server.xdel(self.channel_name, id)
-        print(f"Resolved case: {self.resolved}")
-        print(int(time.time()) - self.time)
+        self.resolved += 1
+        print(f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n\033[1G\033[2KProcessed Data: {self.processed}\n\033[1G\033[2KResolved Number: {self.resolved}\n\033[1G\033[2KListened Data: {self.listened}", end="", flush=True)
+        # if self.processed == 25:
+        #     print(f"\nAverage time of task: {sum(self.process_time) / len(self.process_time)}\nTotal time to solve: {int(time.time()) - self.time}")
 
     def channel_subscribe(self, topics) -> PubSub:
         _redis_instance = self.redis_server.pubsub()
@@ -138,6 +147,8 @@ class Streaming():
     def put_message_to_working_thread(self, data: dict) -> None:
         try:
             self.data_streaming.put(data)
+            self.owned_data = self.data_streaming.qsize()
+            print(f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n\033[1G\033[2KProcessed Data: {self.processed}\n\033[1G\033[2KResolved Number: {self.resolved}\n\033[1G\033[2KListened Data: {self.listened}", end="", flush=True)
         except TypeError:
             traceback.print_exc()
 
@@ -145,26 +156,48 @@ class Streaming():
         data = self.redis_server.xrange(self.channel_name, min=stream_id, max=stream_id)
         return redis_xrange_to_python(data)
 
-    def exec_cmd(self, cmd_package_list: list[dict]) -> None:
-        # if not random.randint(0, 1):
-        #     raise Exception
-        for _cmd in cmd_package_list:
-            self.resolved += 1
-            self.redis_server.publish(self.subscribe_topics, json.dumps(_cmd))
+    def __register_class_method(self, _class):
+        return {attribute: getattr(_class, attribute) for attribute in dir(_class) if callable(getattr(_class, attribute)) and attribute.startswith('__') is False}
+
+    def IO_intensive_task(self, data) -> True:
+        start = time.time()
+        with open(data.get("input_file"), 'r') as file:
+            contents = file.readlines()  # 讀取文件全部內容
+            with open(f'./task_folder/{data.get("output_file")}_{time.time()}', 'w') as file:
+                for row in contents:
+                    file.writelines(f"{row[:-2]} World\n")  # 將讀取的數據寫入新文件
+        return time.time() - start
+
+    def CPU_intensive_task(self, data: dict):
+        start = time.time()
+        def fibonacci(n):
+            if n <= 1:
+                return n
+            else:
+                return fibonacci(n-1) + fibonacci(n-2)
+        result = fibonacci(data.get("fibonacci_number"))
+        return time.time() - start
+    
+    def exec_time_cmd(self, data) -> bool:
+        time.sleep(data.get("timesleep")) if data.get("timesleep") else ...
+        return True
 
     def queuing_data_processing(self, data_queue: queue.Queue):
         while True:
-            _data_list = data_queue.get()
-            if _data_list is not None:
+            _data: dict = data_queue.get()
+            self.owned_data = data_queue.qsize()
+            if _data is not None:
                 '''
                     Decide whether data need to be executed
                     (Store in self.command)
                 '''
-                for _d in _data_list:
-                    _d["token"] = Encryption.build_token()
-                    self.command_token.add(_d["token"])
+                _data["token"] = Encryption.build_token()
+                self.command_token.add(_data["token"])
                 try:
-                    self.exec_cmd(cmd_package_list=_data_list)
+                    self.process_time.append(self.command_function[_data["command"]](json.loads(_data["data"])))
+                    self.processed += 1
+                    print(f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n\033[1G\033[2KProcessed Data: {self.processed}\n\033[1G\033[2KResolved Number: {self.resolved}\n\033[1G\033[2KListened Data: {self.listened}", end="", flush=True)
+                    self.redis_server.publish(self.subscribe_topics, json.dumps(_data))
                 except:
                     pass
             data_queue.task_done()
@@ -172,12 +205,11 @@ class Streaming():
     def pubsub_listening(self, pubsub: PubSub):
         for i in pubsub.listen():
             if i["type"] == "message":
+                self.listened += 1
+                print(f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n\033[1G\033[2KProcessed Data: {self.processed}\n\033[1G\033[2KResolved Number: {self.resolved}\n\033[1G\033[2KListened Data: {self.listened}", end="", flush=True)
                 data = redis_subscribe_to_python(i)
                 if data["token"] in self.command_token:
-                    self.count += 1
-                    # print(self.count)
                     self.message_confirm_and_ack_delete(id=data.get("id"))
-                # print(f"in sub channel: {data}")
 
     def pending_list_processing(self):
         while True:
@@ -221,11 +253,12 @@ class Streaming():
                 streams={
                     self.channel_name: ">"
                 },
-                count=100,
+                count=1,
                 block=0 if block else None)
             if data:
                 result = redis_xread_to_python(data)
-                self.put_message_to_working_thread(result)
+                for _d in result:
+                    self.put_message_to_working_thread(_d)
             self.data_streaming.join()
 
     def __build_stream_thread(self, consumer_group: str, consumer: str, block: bool = False):

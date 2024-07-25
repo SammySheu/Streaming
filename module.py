@@ -45,6 +45,7 @@ class Streaming():
     channel_name == stream in redis
     asynchronous == whether to wait for reply
     '''
+    command_function = {}
     def __init__(self,
         user_module: str,
         redis_host: str,
@@ -71,7 +72,7 @@ class Streaming():
         self.time = int(time.time())
         print(f"\nDataQueue: {self.owned_data}\n\033[1G\033[2KProcessed Data: {self.processed}\n\033[1G\033[2KResolved Number: {self.resolved}\n\033[1G\033[2KListened Data: {self.listened}", end="", flush=True)
 
-        self.command_function = self.__register_class_method(self)
+        Streaming.command_function.update(self.__register_class_method(self))
         # Class init with redis and consumer group
         self.__init_redis()
         self.__create_xgroup(user_module)
@@ -79,6 +80,11 @@ class Streaming():
         self.__build_working_thread()
         self.__build_pubsub_thread()
         self.__build_pending_thread()
+
+    @classmethod
+    def register_to_stream(cls, func: Callable) -> Callable:
+        cls.command_function[func.__name__] = func
+        return func
 
     def __init_redis(self) -> None:
         self.redis_server = redis.Redis(host=self.redis_host, port = self.redis_port, db=self.redis_db)
@@ -129,7 +135,8 @@ class Streaming():
         """
         Auto-claim messages to master if idle time surpassed
         """
-        self.redis_server.xautoclaim(name=self.channel_name, groupname=self.group, consumername=master, min_idle_time=idle_time)
+        res = self.redis_server.xautoclaim(name=self.channel_name, groupname=self.group, consumername=master, min_idle_time=idle_time)
+        # print(res)
     
     def message_confirm_and_ack_delete(self, id: str):
         self.redis_server.xack(self.channel_name, self.group, id)
@@ -157,30 +164,7 @@ class Streaming():
         return redis_xrange_to_python(data)
 
     def __register_class_method(self, _class):
-        return {attribute: getattr(_class, attribute) for attribute in dir(_class) if callable(getattr(_class, attribute)) and attribute.startswith('__') is False}
-
-    def IO_intensive_task(self, data) -> True:
-        start = time.time()
-        with open(data.get("input_file"), 'r') as file:
-            contents = file.readlines()  # 讀取文件全部內容
-            with open(f'./task_folder/{data.get("output_file")}_{time.time()}', 'w') as file:
-                for row in contents:
-                    file.writelines(f"{row[:-2]} World\n")  # 將讀取的數據寫入新文件
-        return time.time() - start
-
-    def CPU_intensive_task(self, data: dict):
-        start = time.time()
-        def fibonacci(n):
-            if n <= 1:
-                return n
-            else:
-                return fibonacci(n-1) + fibonacci(n-2)
-        result = fibonacci(data.get("fibonacci_number"))
-        return time.time() - start
-    
-    def exec_time_cmd(self, data) -> bool:
-        time.sleep(data.get("timesleep")) if data.get("timesleep") else ...
-        return True
+        return {attribute: getattr(_class, attribute) for attribute in dir(_class) if callable(getattr(_class, attribute)) and attribute.startswith('__') is False and attribute.startswith('_') is False}
 
     def queuing_data_processing(self, data_queue: queue.Queue):
         while True:
@@ -194,7 +178,8 @@ class Streaming():
                 _data["token"] = Encryption.build_token()
                 self.command_token.add(_data["token"])
                 try:
-                    self.process_time.append(self.command_function[_data["command"]](json.loads(_data["data"])))
+                    self.command_function[_data["command"]](json.loads(_data["data"]))
+                    # self.process_time.append()
                     self.processed += 1
                     print(f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n\033[1G\033[2KProcessed Data: {self.processed}\n\033[1G\033[2KResolved Number: {self.resolved}\n\033[1G\033[2KListened Data: {self.listened}", end="", flush=True)
                     self.redis_server.publish(self.subscribe_topics, json.dumps(_data))
@@ -225,19 +210,22 @@ class Streaming():
                 min="-",
                 max="+",
                 count=1000)
-            self.redis_server.xpending(name="NCB", groupname="Module")
+            nowhere_pending = self.redis_server.xpending(name="NCB", groupname="Module")
             # print(f"PEL:{len(pending_list)} myself={self.workerID} master={masterID}")
             for _p_info in pending_list:
                 # Only dealing with messages that are belong to itself and stay there surpass 3 seconds
-                if _p_info["time_since_delivered"] > 60000:
+                if _p_info["time_since_delivered"] > 3000:
                     data = self.read_data_in_stream(_p_info["message_id"].decode())
-                    for _d in data:
-                        _d["id"] = _p_info["message_id"].decode()
-                        _d["token"] = Encryption.build_token()
-                        self.command_token.add(_d["token"])
+                    # self.command_function[data["command"]](json.loads(data["data"]))
                     try:
-                        self.exec_cmd(cmd_package_list=data)
-                        # print("data_received_from_queue")
+                        for _d in data:
+                            _d["id"] = _p_info["message_id"].decode()
+                            _d["token"] = Encryption.build_token()
+                            self.command_token.add(_d["token"])
+                            # self.command_function[_d["command"]](json.loads(_d["data"]))
+                            self.put_message_to_working_thread(_d)
+                            # self.exec_cmd(cmd_package_list=data)
+                            # print("data_received_from_queue")
                     except:
                         pass
                 
@@ -279,6 +267,32 @@ class Streaming():
     def __build_pending_thread(self):
         self.pending_thread = RestartableThread(target=self.pending_list_processing)
         self.pending_thread.start()
+
+@Streaming.register_to_stream
+def IO_intensive_task(data) -> True:
+    start = time.time()
+    with open(data.get("input_file"), 'r') as file:
+        contents = file.readlines()  # 讀取文件全部內容
+        with open(f'./task_folder/{data.get("output_file")}_{time.time()}', 'w') as file:
+            for row in contents:
+                file.writelines(f"{row[:-2]} World\n")  # 將讀取的數據寫入新文件
+    return time.time() - start
+
+@Streaming.register_to_stream
+def CPU_intensive_task(data: dict):
+    start = time.time()
+    def fibonacci(n):
+        if n <= 1:
+            return n
+        else:
+            return fibonacci(n-1) + fibonacci(n-2)
+    result = fibonacci(data.get("fibonacci_number"))
+    return time.time() - start
+
+@Streaming.register_to_stream
+def exec_time_cmd(data) -> bool:
+    time.sleep(data.get("timesleep")) if data.get("timesleep") else ...
+    return True
 
 if __name__ == "__main__":
     cb = Streaming(user_module="Module", redis_host="127.0.0.1", redis_port=6379, redis_db=13, channel_name="NCB")

@@ -7,59 +7,22 @@ import time
 import json
 import queue
 import traceback
-import redis
-
-from redis import ResponseError
-from redis.client import PubSub
-from pydantic import ValidationError
 from typing import Callable
 
-from multithread import RestartableThread
-from schemas import CommandPackage, ConsumerInfo, GroupInfo, StreamInfo
-from encryption import Encryption
-from exception import StreamingException
-from stream_operate import StreamOperate
+import redis
+from redis import ResponseError
+from redis.client import PubSub
 
-
-def redis_xread_to_python(data) -> list:
-    '''
-    Customized function to convert redis xread data to python dictionary
-    '''
-    try:
-        _, _dl = data[0]
-        _result = []
-        for _d in _dl:
-            item_id, td = _d
-            _temp = {k.decode(): v.decode() for k, v in td.items()}
-            _temp["entry_id"] = item_id.decode()
-            _result.append(_temp)
-    except ValueError:
-        print(ValueError)
-    except KeyError:
-        print(KeyError)
-    return _result
-
-
-def redis_subscribe_to_python(data):
-    '''
-    Customized function to convert redis subscribe data to python dictionary
-    '''
-    data = json.loads(data["data"].decode())
-    return data
-
-
-def redis_xrange_to_python(data):
-    '''
-    Customized function to convert redis xrange data to python dictionary
-    '''
-    try:
-        _, _dl = data[0]
-        _temp = {k.decode(): v.decode() for k, v in _dl.items()}
-    except ValueError:
-        print(ValueError)
-    except KeyError:
-        print(KeyError)
-    return [_temp]
+from schemas.schemas import CommandPackage, ConsumerInfo, GroupInfo, StreamInfo
+from utils.multithread import RestartableThread
+from utils.encryption import Encryption
+from utils.exception import StreamingException
+from utils.stream_operate import StreamOperate
+from utils.convert_function import (
+    redis_xread_to_python,
+    redis_subscribe_to_python,
+    redis_xrange_to_python
+)
 
 
 class Streaming():
@@ -122,9 +85,6 @@ class Streaming():
             flush=True
         )
 
-        Streaming.command_function.update(self.__register_class_method(self))
-        # self.__create_channel_and_group(
-        #     operate_set={self.send_channel, self.receive_channel})
         self.__build_stream_thread(thread_name="StreamListening",
                                    consumer_group=self.module_name,
                                    consumer=self.module_uid,
@@ -134,6 +94,7 @@ class Streaming():
             thread_name="QueuingDataProcessing", streaming_data=self.data_streaming)
         self.__build_pubsub_thread(thread_name="BroadcastListening")
         # self.__build_pending_thread(thread_name="PendingListProcessing")
+        self.update_register_function()
 
     @classmethod
     def cmd_register(cls, func: Callable) -> Callable:
@@ -143,13 +104,8 @@ class Streaming():
         cls.command_function[func.__name__] = func
         return func
 
-    # def __create_channel_and_group(self, pairs: dict[str, set]) -> None:
-    #     for channel, groups in pairs.items:
-    #         for _g in groups:
-    #             try:
-
-    #             except ResponseError:
-    #                 pass
+    def update_register_function(self):
+        Streaming.command_function.update(self.__register_class_method(self))
 
     def __look_up_stream(self, channel: str) -> None:
         try:
@@ -191,21 +147,22 @@ class Streaming():
                 master, current = _name, _info.pending
         return master
 
-    def __delete_inactive_consumers(self, consumers_info: dict[str, ConsumerInfo], dead_time: int = 60000) -> dict[str, ConsumerInfo]:
+    def __delete_inactive_consumers(
+        self,
+        consumers_info: dict[str, ConsumerInfo],
+        dead_time: int = 60000
+    ) -> dict[str, ConsumerInfo]:
         _to_delete = set()
         for _consumer, _info in consumers_info.items():
             if _info.idle > dead_time:
                 self.redis_server.xgroup_delconsumer(
-                    name=self.receive_channel.stream_name, groupname=self.module_name, consumername=_consumer)
+                    name=self.receive_channel.stream_name,
+                    groupname=self.module_name,
+                    consumername=_consumer
+                )
                 _to_delete.add(_consumer)
         for _t in _to_delete:
             del consumers_info[_t]
-
-    # When sending message, token is unneeded and message was acked by others
-
-    def add_message(self, _package: CommandPackage):
-        self.redis_server.xadd(name=_package.sending_channel,
-                               fields=_package.command_basic.model_dump())
 
     def message_autoclaim_to_master(self, master: str, idle_time: int = 60000):
         """
@@ -219,45 +176,21 @@ class Streaming():
         _cmd_pkg.token = Encryption.build_token()
         self.owned_token.add(_cmd_pkg.token)
 
-    # To specify which channel, what type of command
-    def format_command(self, **cmd_package) -> CommandPackage:
-        try:
-            _cp = CommandPackage(**cmd_package)
-        except ValidationError as e:
-            print(e)
-            _cp = CommandPackage()
-        if not _cp.sending_channel:
-            _cp.sending_channel = self.channel["sending"]
-        if _cp.command_basic.command_type == "send_message":
-            _cp.command_basic.command_type = "SHOOT"
-        elif _cp.command_basic.command_type == "send_command":
-            _cp.command_basic.command_type = "CONFIRM"
-        if _cp.command_basic.command_type == "send_callback":
-            _cp.command_basic.command_type = "CALLBACK"
-        return _cp
-
     def send_message(self, command: str, sending_channel: str = "", **kwargs) -> None:
         '''
             Format the command package and send the message to the specified channel
         '''
         _package = CommandPackage(type="SHOOT", command=command, **kwargs)
-        # _package = self.format_command(sending_channel=sending_channel,
-        #                                command=command, command_type=self.send_message.__name__,
-        #                                **kwargs)
         if sending_channel == self.receive_channel.stream_name:
             self.receive_channel.add_data(_package.model_dump())
         else:
             self.send_channel.add_data(_package.model_dump())
-        # self.add_message(_package)
         return None
 
     def send_command(self, command: str, sending_channel: str = "", **kwargs) -> None:
         '''
             Format the command package and send the command to the specified channel
         '''
-        # _package = self.format_command(sending_channel=sending_channel,
-        #                                 command=command, command_type=self.send_command.__name__,
-        #                                 **kwargs)
         _package = CommandPackage(type="CONFIRM", command=command, **kwargs)
         self.add_token(_package)
         if sending_channel == self.receive_channel.stream_name:
@@ -269,13 +202,10 @@ class Streaming():
         '''
             Format the command package and send the command to the specified channel
         '''
-        # __package = self.format_command(sending_channel=sending_channel,
-        #                                 command=command, command_type=self.send_callback.__name__,
-        #                                 **kwargs)
         _package = CommandPackage(type="CALLBACK", command=command, **kwargs)
         self.add_token(_package)
 
-        self.receive_channel.add_data(_package.model_dump())
+        self.send_channel.add_data(_package.model_dump())
         return _package.token
 
     def wait_for_callback(self, token_list: list[str]):
@@ -399,9 +329,9 @@ class Streaming():
                 if _package.token in self.owned_token:
                     if _package.type == "CALLBACK":
                         self.command_data[_package.token] = _package.response
-                    self.receive_channel.ack_data(
+                    self.send_channel.ack_data(
                         group_name=self.module_name, ids={_package.entry_id})
-                    self.receive_channel.del_data(ids={_package.entry_id})
+                    self.send_channel.del_data(ids={_package.entry_id})
                     # self.message_confirm_and_ack_delete(_msg=data.get("id"))
 
     def pending_list_processing(self):
@@ -419,7 +349,7 @@ class Streaming():
             pending_list = self.redis_server.xpending_range(
                 name=self.receive_channel.stream_name,
                 groupname=self.module_name,
-                consumername=self.workerID,
+                consumername=self.module_uid,
                 min="-",
                 max="+",
                 count=1000)
@@ -491,67 +421,15 @@ class Streaming():
         self.pending_thread.start()
 
 
-@Streaming.cmd_register
-def io_intensive_task(data) -> bool:
-    """
-    This function performs an I/O intensive task.
-    """
-    start = time.time()
-    with open(data.get("input_file"), 'r', encoding='utf-8') as file:
-        contents = file.readlines()  # 讀取文件全部內容
-        with open(
-                f'./task_folder/{data.get("output_file")}_{time.time()}',
-                'w', encoding='utf-8') as file:
-            for row in contents:
-                file.writelines(f"{row[:-2]} World\n")  # 將讀取的數據寫入新文件
-    return time.time() - start
-
-
-@Streaming.cmd_register
-def cpu_intensive_task(data: dict):
-    """
-    This function consumes lots of CPU work.
-    """
-    start = time.time()
-
-    def fibonacci(n):
-        if n <= 1:
-            return n
-        else:
-            return fibonacci(n-1) + fibonacci(n-2)
-    fibonacci(data.get("fibonacci_number"))
-    return time.time() - start
-
-
-@Streaming.cmd_register
-def exec_time_cmd(data) -> bool:
-    """
-    This function executes a command with a specified time sleep.
-    """
-    if data.get("timesleep"):
-        time.sleep(data.get("timesleep"))
-    return f'Sleep for {data.get("timesleep")}'
-
-
 if __name__ == "__main__":
+    from utils.test_function import TestClass
+    from module import Streaming
+    TestClass()
     cb = Streaming(
-        user_module="ted",
+        user_module="sammy",
         redis_host="127.0.0.1",
         redis_port=6379,
         redis_db=13,
-        receiving_channel_pair=("receiving", {"ted"}),
-        sending_channel_pair=("sending", {"sam"})
+        receiving_channel_pair=("receiving", {"sammy"}),
+        sending_channel_pair=("sending", {"ted"})
     )
-    tasks = []
-    for _ in range(1000):
-        tasks.append(cb.send_callback(
-            sending_channel="receiving",
-            command="exec_time_cmd",
-            data=json.dumps({
-                    "input_file": "IO_task_input.txt",
-                    "output_file": "IO_task_output.txt",
-                    "timesleep": 0.1
-            })))
-    # time.sleep(10)
-    answer = cb.wait_for_callback(tasks)
-    print(answer)

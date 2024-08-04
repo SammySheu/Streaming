@@ -3,6 +3,7 @@ import threading
 import inspect
 import ctypes
 
+
 class RestartableThread(Thread):
     def __init__(
         self,
@@ -14,10 +15,13 @@ class RestartableThread(Thread):
         daemon=None,
         kwargs: dict = None
     ):
+        self.result = None
+        # self.target = target
         self.args_option = args
         self.daemon_option = daemon
         self.kwargs_option = kwargs
-        Thread.__init__(self, group, target, name=name, args=args, kwargs=kwargs, daemon=daemon)
+        Thread.__init__(self, group, target, name=name,
+                        args=args, kwargs=kwargs, daemon=daemon)
 
     def get_id(self):
         # returns id of the respective thread
@@ -27,6 +31,9 @@ class RestartableThread(Thread):
         for id, thread in threading._active.items():
             if thread is self:
                 return id
+
+    # def run(self) -> None:
+    #     self.result = self.target(self.args_option)
 
     def clone(self):
         clone_td = RestartableThread(
@@ -47,18 +54,21 @@ class RestartableThread(Thread):
     def exit(self):
         if self.is_alive():
             thread_id = self.get_id()
-            res = ctypes.pythonapi.PyThreadState_SetAsyncExc(thread_id, ctypes.py_object(SystemExit))
+            res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                thread_id, ctypes.py_object(SystemExit))
             if res > 1:
                 ctypes.pythonapi.PyThreadState_SetAsyncExc(thread_id, 0)
                 print('Exception raise failure')
             stop_thread(self)
+
 
 def _async_raise(tid, exctype):
     """raises the exception, performs cleanup if needed"""
     tid = ctypes.c_long(tid)
     if not inspect.isclass(exctype):
         exctype = type(exctype)
-    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(tid, ctypes.py_object(exctype))
+    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        tid, ctypes.py_object(exctype))
     if res == 0:
         raise ValueError("invalid thread id")
     elif res != 1:
@@ -66,6 +76,7 @@ def _async_raise(tid, exctype):
         # and you should call it again with exc=NULL to revert the effect"""
         ctypes.pythonapi.PyThreadState_SetAsyncExc(tid, None)
         raise SystemError("PyThreadState_SetAsyncExc failed")
+
 
 def stop_thread(thread):
     _async_raise(thread.ident, SystemExit)

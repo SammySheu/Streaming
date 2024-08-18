@@ -62,9 +62,9 @@ class Streaming():
         self.asynchronous = asynchronous
         self.count = 0
         self.callback_total = 0
-        self.callback_manager = dict()  # {<token>: <thread>}
+        self.callback_queue = queue.Queue()  # [(<token>, <data>)]
+        # self.callback_manager = dict()  # {<token>: <thread>}
         self.owned_token = set()
-        self.command_data = dict()  # {<token>: <callback_data>}
         self.pid = os.getpid()
         self.data_streaming = queue.Queue()
         self.run_command: Callable = None
@@ -208,15 +208,18 @@ class Streaming():
         self.send_channel.add_data(_package.model_dump())
         return _package.token
 
-    def wait_for_callback(self, token_list: list[str]):
+    def wait_for_callback(self, *token_list: tuple[str]) -> list:
+        _require = len(token_list)
+        _return = [""] * _require
         count = 0
-        _result = [dict()] * len(token_list)
-        while count < len(token_list):
-            for index, _token in enumerate(token_list):
-                if self.command_data.get(_token):
-                    _result[index] = self.command_data.pop(_token)
-                    count += 1
-        return _result
+        while count < _require:
+            token, data = self.callback_queue.get()
+            if token in token_list:
+                _return[token_list.index(token)] = data
+                count += 1
+            else:
+                raise StreamingException("Token not found")
+        return _return
 
     def message_confirm_and_ack_delete(self, _msg: str):
         '''
@@ -287,7 +290,6 @@ class Streaming():
                             "Command function not registerd")
                     result = self.command_function[_data.command](
                         json.loads(_data.data))
-                    # self.command_data[_data.token] = _data.data
                     self.processed += 1
                     print(
                         f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n"
@@ -327,8 +329,10 @@ class Streaming():
                 data = redis_subscribe_to_python(i)
                 _package = CommandPackage(**data)
                 if _package.token in self.owned_token:
+                    # Only put listened data into callback_queue if it is type of callback
                     if _package.type == "CALLBACK":
-                        self.command_data[_package.token] = _package.response
+                        self.callback_queue.put(
+                            (_package.token, _package.response))
                     self.send_channel.ack_data(
                         group_name=self.module_name, ids={_package.entry_id})
                     self.send_channel.del_data(ids={_package.entry_id})
@@ -394,7 +398,17 @@ class Streaming():
                     self.put_message_to_working_thread(_d)
             self.data_streaming.join()
 
-    def __build_stream_thread(self, thread_name: str, consumer_group: str, consumer: str, count: int, block: bool = False):
+    def __build_stream_thread(
+        self,
+        thread_name: str,
+        consumer_group: str,
+        consumer: str,
+        count: int,
+        block: bool = False
+    ):
+        """
+            Builds a stream thread for listening to messages.
+        """
         # Once get the message, back to the starting point to read message
         self.main_thread = RestartableThread(target=self.stream_listening,
                                              args=(consumer_group,
@@ -403,12 +417,18 @@ class Streaming():
         self.main_thread.start()
 
     def __build_working_thread(self, thread_name: str, streaming_data: queue.Queue):
+        """
+            Builds a working thread for processing messages.
+        """
         self.working_thread = RestartableThread(target=self.queuing_data_processing,
                                                 args=(streaming_data, ),
                                                 name=thread_name)
         self.working_thread.start()
 
     def __build_pubsub_thread(self, thread_name: str):
+        '''
+            Builds a pubsub thread for listening to the broadcast channel
+        '''
         _instance = self.channel_subscribe(self.subscribe_topics)
         self.subpub_thread = RestartableThread(target=self.pubsub_listening,
                                                args=(_instance, ),

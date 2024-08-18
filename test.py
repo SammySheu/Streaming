@@ -19,7 +19,7 @@ for _ in range(100):
         data=json.dumps({
                 "input_file": "IO_task_input.txt",
                 "output_file": "IO_task_output.txt",
-                "timesleep": 0.1
+                "timesleep": 1
         })))
-answer = cb.wait_for_callback(tasks)
+answer = cb.wait_for_callback(*tasks)
 print(answer)

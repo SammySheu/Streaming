@@ -1,5 +1,7 @@
-from pydantic import BaseModel, field_validator, Field
+from pydantic import BaseModel, field_validator, Field, model_validator
 from typing import Any
+from dataclasses import dataclass
+import json
 
 
 class CommandPackage(BaseModel):
@@ -33,3 +35,27 @@ class ConsumerInfo(BaseModel):
     pending: int
     idle: int
     inactive: int
+
+
+@dataclass
+class StreamData():
+    key: str
+    values: Any
+
+    def __init__(self, item: tuple):
+        self.key = item[0].decode()
+        self.values = self.helper_function(item[1])
+
+    @staticmethod
+    def helper_function(data):
+        if isinstance(data, bytes):
+            return StreamData.helper_function(data.decode())
+        elif isinstance(data, list):
+            return [StreamData.helper_function(i) for i in data]
+        elif isinstance(data, dict):
+            return {StreamData.helper_function(k): StreamData.helper_function(v) for k, v in data.items()}
+        elif isinstance(data, str):
+            try:
+                return json.loads(data)
+            except json.JSONDecodeError:
+                return data

@@ -35,7 +35,8 @@ class Streaming():
                  user_module: str,
                  redis_host: str,
                  redis_port: int,
-                 redis_db: int
+                 redis_db: int,
+                 daemon: bool = False,
                  ) -> None:
         self.module_name = user_module
         self.module_uid = f"{user_module}_{os.getpid()}"
@@ -77,10 +78,12 @@ class Streaming():
                                    consumer_group=self.module_name,
                                    consumer=self.module_uid,
                                    count=1,
-                                   block=True)
+                                   block=True,
+                                   daemon=daemon)
         self.__build_working_thread(
-            thread_name="QueuingDataProcessing", streaming_data=self.data_streaming)
-        self.__build_pubsub_thread(thread_name="BroadcastListening")
+            thread_name="QueuingDataProcessing", streaming_data=self.data_streaming, daemon=daemon)
+        self.__build_pubsub_thread(
+            thread_name="BroadcastListening", daemon=daemon)
         # self.__build_pending_thread(thread_name="PendingListProcessing")
         self.update_register_function()
 
@@ -278,6 +281,14 @@ class Streaming():
                             "Command function not registerd")
                     result = self.command_function[_data.command](
                         json.loads(_data.data))
+                    if _data.type == "SHOOT":
+                        self.stream_operator.ack_data(
+                            group_name=self.module_name, ids={_data.entry_id})
+                        self.stream_operator.del_data(ids={_data.entry_id})
+                    elif _data.type == "CONFIRM" or _data.type == "CALLBACK":
+                        _data.response = result
+                        self.redis_server.publish(
+                            self.subscribe_topics, json.dumps(_data.model_dump()))
                     self.processed += 1
                     print(
                         f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n"
@@ -287,14 +298,6 @@ class Streaming():
                         end="",
                         flush=True
                     )
-                    if _data.type == "SHOOT":
-                        self.stream_operator.ack_data(
-                            group_name=self.module_name, ids={_data.entry_id})
-                        self.stream_operator.del_data(ids={_data.entry_id})
-                    elif _data.type == "CONFIRM" or _data.type == "CALLBACK":
-                        _data.response = result
-                        self.redis_server.publish(
-                            self.subscribe_topics, json.dumps(_data.model_dump()))
                 except Exception as e:
                     raise StreamingException(str(e)) from e
             data_queue.task_done()
@@ -393,7 +396,8 @@ class Streaming():
         consumer_group: str,
         consumer: str,
         count: int,
-        block: bool = False
+        block: bool,
+        daemon: bool
     ):
         """
             Builds a stream thread for listening to messages.
@@ -402,26 +406,27 @@ class Streaming():
         self.main_thread = RestartableThread(target=self.stream_listening,
                                              args=(consumer_group,
                                                    consumer, count, block),
-                                             name=thread_name)
+                                             name=thread_name, daemon=daemon)
         self.main_thread.start()
 
-    def __build_working_thread(self, thread_name: str, streaming_data: queue.Queue):
+    def __build_working_thread(self, thread_name: str, streaming_data: queue.Queue, daemon: bool):
         """
             Builds a working thread for processing messages.
         """
         self.working_thread = RestartableThread(target=self.queuing_data_processing,
                                                 args=(streaming_data, ),
-                                                name=thread_name)
+                                                name=thread_name, daemon=daemon)
         self.working_thread.start()
 
-    def __build_pubsub_thread(self, thread_name: str):
+    def __build_pubsub_thread(self, thread_name: str, daemon: bool):
         '''
             Builds a pubsub thread for listening to the broadcast channel
         '''
         _instance = self.channel_subscribe(self.subscribe_topics)
         self.subpub_thread = RestartableThread(target=self.pubsub_listening,
                                                args=(_instance, ),
-                                               name=thread_name)
+                                               name=thread_name,
+                                               daemon=daemon)
         self.subpub_thread.start()
 
     def __build_pending_thread(self, thread_name: str):

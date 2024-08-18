@@ -3,16 +3,15 @@ from redis.exceptions import ResponseError
 
 
 class StreamOperate:
-    def __init__(self, redis_host, redis_port, redis_db, stream_name, groups: set):
+    def __init__(self, redis_host, redis_port, redis_db, stream_name, consumer_group: str):
         self.redis = redis.Redis(
             host=redis_host, port=redis_port, db=redis_db)
         self.stream_name = stream_name
-        for _g in groups:
-            try:
-                self.create_group(_g)
-            except ResponseError as e:
-                if "BUSYGROUP Consumer Group name already exists" not in str(e):
-                    raise e
+        try:
+            self.create_group(consumer_group)
+        except ResponseError as e:
+            if "BUSYGROUP Consumer Group name already exists" not in str(e):
+                raise e
 
     def stream_info(self):
         return self.redis.xinfo_stream(name=self.stream_name)

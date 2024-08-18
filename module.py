@@ -28,7 +28,6 @@ from utils.convert_function import (
 class Streaming():
     '''
     channel_name == stream in redis
-    asynchronous == whether to wait for reply
     '''
     command_function = {}
 
@@ -36,10 +35,7 @@ class Streaming():
                  user_module: str,
                  redis_host: str,
                  redis_port: int,
-                 redis_db: int,
-                 receiving_channel_pair: tuple[str, set],
-                 sending_channel_pair: tuple[str, set],
-                 asynchronous: bool = False
+                 redis_db: int
                  ) -> None:
         self.module_name = user_module
         self.module_uid = f"{user_module}_{os.getpid()}"
@@ -47,12 +43,11 @@ class Streaming():
             redis_host=redis_host,
             redis_port=redis_port,
             redis_db=redis_db,
-            stream_name=receiving_channel_pair[0],
-            groups=receiving_channel_pair[1]
+            stream_name=f"{user_module}Server",
+            consumer_group=user_module
         )
         self.redis_server = redis.Redis(
             host=redis_host, port=redis_port, db=redis_db)
-        self.asynchronous = asynchronous
         self.count = 0
         self.callback_total = 0
         self.callback_queue = queue.Queue()  # [(<token>, <data>)]

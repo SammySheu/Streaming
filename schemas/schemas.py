@@ -7,7 +7,7 @@ import json
 class CommandPackage(BaseModel):
     type: str
     command: str
-    data: str
+    data: Any
     channel_name: str = ""
     token: str = ""
     entry_id: str = ""
@@ -59,3 +59,13 @@ class StreamData():
                 return json.loads(data)
             except json.JSONDecodeError:
                 return data
+
+
+@dataclass
+class GroupData():
+    stream_name: str
+    stream_data: list[StreamData]
+
+    def __init__(self, item: list):
+        self.stream_name = item[0].decode()
+        self.stream_datas = [StreamData(_pair) for _pair in item[1]]

@@ -13,13 +13,13 @@ import redis
 from redis import ResponseError
 from redis.client import PubSub
 
-from schemas.schemas import CommandPackage, ConsumerInfo, GroupInfo, StreamInfo
+from schemas.schemas import (
+    CommandPackage, ConsumerInfo, GroupInfo, StreamInfo, GroupData)
 from utils.multithread import RestartableThread
 from utils.encryption import Encryption
 from utils.exception import StreamingException
 from utils.stream_operate import StreamOperate
 from utils.convert_function import (
-    redis_xread_to_python,
     redis_subscribe_to_python,
     redis_xrange_to_python
 )
@@ -263,6 +263,17 @@ class Streaming():
         except TypeError:
             traceback.print_exc()
 
+    def _convert_group_data(self, data) -> list[CommandPackage]:
+        '''
+        Convert the group data to CommandPackage
+        '''
+        _result = []
+        group_data = GroupData(data[0])
+        for _stream_data in group_data.stream_datas:
+            _stream_data.values["entry_id"] = _stream_data.key
+            _result.append(CommandPackage(**_stream_data.values))
+        return _result
+
     def read_data_in_stream(self, stream_id: str):
         '''
             Read the data in the stream
@@ -289,7 +300,7 @@ class Streaming():
                         raise StreamingException(
                             "Command function not registerd")
                     result = self.command_function[_data.command](
-                        json.loads(_data.data))
+                        _data.data)
                     if _data.type == "SHOOT":
                         self.ack_and_delete_message(
                             stream_name=_data.channel_name, group_name=self.module_name, ids={_data.entry_id})
@@ -404,9 +415,9 @@ class Streaming():
                 count=count,
                 block=block)
             if data:
-                result = redis_xread_to_python(data)
+                result: list[CommandPackage] = self._convert_group_data(data)
                 for _d in result:
-                    self.put_message_to_working_thread(_d)
+                    self.put_message_to_working_thread(_d.model_dump())
             self.data_streaming.join()
 
     def __build_stream_thread(
@@ -464,7 +475,7 @@ if __name__ == "__main__":
         user_module="Sammy",
         redis_host="127.0.0.1",
         redis_port=6379,
-        redis_db=13
+        redis_db=0
     )
     cb.broadcast_message(command="exec_time_cmd",
                          data=json.dumps({"hello": "world", "timesleep": 1}))

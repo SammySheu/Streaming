@@ -212,6 +212,15 @@ class Streaming():
                 raise StreamingException("Token not found")
         return _return
 
+    def broadcast_message(self, command: str, **kwargs) -> None:
+        '''
+            Broadcast the message to all the user_module
+        '''
+        _package = CommandPackage(type="BROADCAST", command=command, **kwargs)
+        self.redis_server.publish(
+            self.subscribe_topics, json.dumps(_package.model_dump()))
+        return None
+
     def message_confirm_and_ack_delete(self, _msg: str):
         '''
             Confirm the message and delete it from the stream
@@ -282,9 +291,8 @@ class Streaming():
                     result = self.command_function[_data.command](
                         json.loads(_data.data))
                     if _data.type == "SHOOT":
-                        self.stream_operator.ack_data(
-                            group_name=self.module_name, ids={_data.entry_id})
-                        self.stream_operator.del_data(ids={_data.entry_id})
+                        self.ack_and_delete_message(
+                            stream_name=_data.channel_name, group_name=self.module_name, ids={_data.entry_id})
                     elif _data.type == "CONFIRM" or _data.type == "CALLBACK":
                         _data.response = result
                         self.redis_server.publish(
@@ -319,16 +327,27 @@ class Streaming():
                 )
                 data = redis_subscribe_to_python(i)
                 _package = CommandPackage(**data)
+                # Only dealing with messages that are belong to itself
                 if _package.token in self.owned_token:
                     if _package.type == "CALLBACK":
                         # Only put listened data into callback_queue if it is type of callback
                         self.callback_queue.put(
                             (_package.token, _package.response))
-                    self.stream_operator.ack_data(
+                    self.ack_and_delete_message(
                         stream_name=_package.channel_name, group_name=self.module_name, ids={_package.entry_id})
-                    self.stream_operator.del_data(
-                        stream_name=_package.channel_name, ids={_package.entry_id})
-                    # self.message_confirm_and_ack_delete(_msg=data.get("id"))
+                else:
+                    if _package.type == "BROADCAST":
+                        self.put_message_to_working_thread(
+                            _package.model_dump())
+
+    def ack_and_delete_message(self, stream_name: str, group_name: str, ids: set[str]):
+        '''
+            Acknowledge and delete the message in the stream
+        '''
+        self.stream_operator.ack_data(
+            stream_name=stream_name, group_name=group_name, ids=ids)
+        self.stream_operator.del_data(
+            stream_name=stream_name, ids=ids)
 
     def pending_list_processing(self):
         '''
@@ -435,15 +454,18 @@ class Streaming():
         self.pending_thread.start()
 
 
+print(id(Streaming))
 if __name__ == "__main__":
     from utils.test_function import TestClass
     from module import Streaming
+    # print(id(Streaming))
     TestClass()
     cb = Streaming(
-        user_module="sammy",
+        user_module="Sammy",
         redis_host="127.0.0.1",
         redis_port=6379,
-        redis_db=13,
-        receiving_channel_pair=("receiving", {"sammy"}),
-        sending_channel_pair=("sending", {"ted"})
+        redis_db=13
     )
+    cb.broadcast_message(command="exec_time_cmd",
+                         data=json.dumps({"hello": "world", "timesleep": 1}))
+    time.sleep(3600)

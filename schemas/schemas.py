@@ -6,6 +6,7 @@ class CommandPackage(BaseModel):
     type: str
     command: str
     data: str
+    channel_name: str = ""
     token: str = ""
     entry_id: str = ""
     response: Any = ""

@@ -14,12 +14,12 @@ cb = Streaming(
 tasks = []
 for _ in range(100):
     tasks.append(cb.send_callback(
-        sending_channel="receiving",
+        sending_channel="sending",
         command="exec_time_cmd",
         data=json.dumps({
-                "input_file": "IO_task_input.txt",
-                "output_file": "IO_task_output.txt",
-                "timesleep": 1
+            "input_file": "IO_task_input.txt",
+            "output_file": "IO_task_output.txt",
+            "timesleep": 0.2
         })))
 answer = cb.wait_for_callback(*tasks)
 print(answer)

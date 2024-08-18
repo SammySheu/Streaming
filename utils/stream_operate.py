@@ -35,14 +35,17 @@ class StreamOperate:
             groupname=group_name, consumername=consumer_name,
             streams={self.stream_name: ">"}, count=count, block=0 if block else None)
 
-    def add_data(self, data: dict):
-        return self.redis.xadd(name=self.stream_name, fields=data)
+    def add_data(self, data: dict, stream_name: str = ""):
+        _stream_name = stream_name if stream_name else self.stream_name
+        return self.redis.xadd(name=_stream_name, fields=data)
 
-    def ack_data(self, group_name: str, ids: set):
-        return self.redis.xack(self.stream_name, group_name, *ids)
+    def ack_data(self, group_name: str, ids: set, stream_name: str = ""):
+        _stream_name = stream_name if stream_name else self.stream_name
+        return self.redis.xack(_stream_name, group_name, *ids)
 
-    def del_data(self, ids: set):
-        return self.redis.xdel(self.stream_name, *ids)
+    def del_data(self, ids: set, stream_name: str = ""):
+        _stream_name = stream_name if stream_name else self.stream_name
+        return self.redis.xdel(_stream_name, *ids)
 
     def autoclaim_data(self, group_name: str, consumer_name: str, idle_time: int):
         return self.redis.xautoclaim(

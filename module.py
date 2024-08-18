@@ -43,14 +43,7 @@ class Streaming():
                  ) -> None:
         self.module_name = user_module
         self.module_uid = f"{user_module}_{os.getpid()}"
-        self.send_channel = StreamOperate(
-            redis_host=redis_host,
-            redis_port=redis_port,
-            redis_db=redis_db,
-            stream_name=sending_channel_pair[0],
-            groups=sending_channel_pair[1]
-        )
-        self.receive_channel = StreamOperate(
+        self.stream_operator = StreamOperate(
             redis_host=redis_host,
             redis_port=redis_port,
             redis_db=redis_db,
@@ -156,7 +149,7 @@ class Streaming():
         for _consumer, _info in consumers_info.items():
             if _info.idle > dead_time:
                 self.redis_server.xgroup_delconsumer(
-                    name=self.receive_channel.stream_name,
+                    name=self.stream_operator.stream_name,
                     groupname=self.module_name,
                     consumername=_consumer
                 )
@@ -181,10 +174,9 @@ class Streaming():
             Format the command package and send the message to the specified channel
         '''
         _package = CommandPackage(type="SHOOT", command=command, **kwargs)
-        if sending_channel == self.receive_channel.stream_name:
-            self.receive_channel.add_data(_package.model_dump())
-        else:
-            self.send_channel.add_data(_package.model_dump())
+        _sending_channel = sending_channel if sending_channel else self.stream_operator.stream_name
+        self.stream_operator.add_data(
+            stream_name=_sending_channel, data=_package.model_dump())
         return None
 
     def send_command(self, command: str, sending_channel: str = "", **kwargs) -> None:
@@ -193,19 +185,20 @@ class Streaming():
         '''
         _package = CommandPackage(type="CONFIRM", command=command, **kwargs)
         self.add_token(_package)
-        if sending_channel == self.receive_channel.stream_name:
-            self.receive_channel.add_data(_package.model_dump())
-        else:
-            self.send_channel.add_data(_package.model_dump())
+        _sending_channel = sending_channel if sending_channel else self.stream_operator.stream_name
+        self.stream_operator.add_data(
+            stream_name=_sending_channel, data=_package.model_dump())
 
-    def send_callback(self, command: str, sending_channel: str = "", **kwargs) -> dict:
+    def send_callback(self, command: str, sending_channel: str, **kwargs) -> dict:
         '''
             Format the command package and send the command to the specified channel
         '''
-        _package = CommandPackage(type="CALLBACK", command=command, **kwargs)
+        _sending_channel = sending_channel if sending_channel else self.stream_operator.stream_name
+        _package = CommandPackage(
+            type="CALLBACK", command=command, channel_name=_sending_channel, **kwargs)
         self.add_token(_package)
-
-        self.send_channel.add_data(_package.model_dump())
+        self.stream_operator.add_data(
+            stream_name=_sending_channel, data=_package.model_dump())
         return _package.token
 
     def wait_for_callback(self, *token_list: tuple[str]) -> list:
@@ -268,7 +261,7 @@ class Streaming():
             Read the data in the stream
         '''
         data = self.redis_server.xrange(
-            self.receive_channel.stream_name, min=stream_id, max=stream_id)
+            self.stream_operator.stream_name, min=stream_id, max=stream_id)
         return redis_xrange_to_python(data)
 
     def __register_class_method(self, _class):
@@ -300,15 +293,15 @@ class Streaming():
                         flush=True
                     )
                     if _data.type == "SHOOT":
-                        self.receive_channel.ack_data(
+                        self.stream_operator.ack_data(
                             group_name=self.module_name, ids={_data.entry_id})
-                        self.receive_channel.del_data(ids={_data.entry_id})
+                        self.stream_operator.del_data(ids={_data.entry_id})
                     elif _data.type == "CONFIRM" or _data.type == "CALLBACK":
                         _data.response = result
                         self.redis_server.publish(
                             self.subscribe_topics, json.dumps(_data.model_dump()))
                 except Exception as e:
-                    print(e)
+                    raise StreamingException(str(e)) from e
             data_queue.task_done()
 
     def pubsub_listening(self, pubsub: PubSub):
@@ -329,13 +322,14 @@ class Streaming():
                 data = redis_subscribe_to_python(i)
                 _package = CommandPackage(**data)
                 if _package.token in self.owned_token:
-                    # Only put listened data into callback_queue if it is type of callback
                     if _package.type == "CALLBACK":
+                        # Only put listened data into callback_queue if it is type of callback
                         self.callback_queue.put(
                             (_package.token, _package.response))
-                    self.send_channel.ack_data(
-                        group_name=self.module_name, ids={_package.entry_id})
-                    self.send_channel.del_data(ids={_package.entry_id})
+                    self.stream_operator.ack_data(
+                        stream_name=_package.channel_name, group_name=self.module_name, ids={_package.entry_id})
+                    self.stream_operator.del_data(
+                        stream_name=_package.channel_name, ids={_package.entry_id})
                     # self.message_confirm_and_ack_delete(_msg=data.get("id"))
 
     def pending_list_processing(self):
@@ -344,21 +338,21 @@ class Streaming():
         '''
         while True:
             info = self.__look_up_consumers(
-                channel=self.receive_channel.stream_name)
+                channel=self.stream_operator.stream_name)
             self.__delete_inactive_consumers(consumers_info=info)
             # Choose master which has the minimum pending messages
             # print(info)
             master_id = self.__elect_master(info)
             # Process self's pending list
             pending_list = self.redis_server.xpending_range(
-                name=self.receive_channel.stream_name,
+                name=self.stream_operator.stream_name,
                 groupname=self.module_name,
                 consumername=self.module_uid,
                 min="-",
                 max="+",
                 count=1000)
             self.redis_server.xpending(
-                name=self.receive_channel.stream_name, groupname=self.module_name)
+                name=self.stream_operator.stream_name, groupname=self.module_name)
             # print(f"PEL:{len(pending_list)} myself={self.workerID} master={master_id}")
             for _p_info in pending_list:
                 # Only dealing with messages that are belong to itself and stay there surpass 3 seconds
@@ -387,7 +381,7 @@ class Streaming():
             Listen to the stream
         '''
         while True:
-            data = self.receive_channel.read_group_data(
+            data = self.stream_operator.read_group_data(
                 group_name=consumer_group,
                 consumer_name=consumer,
                 count=count,

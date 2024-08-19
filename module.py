@@ -224,15 +224,6 @@ class Streaming():
             self.subscribe_topics, json.dumps(_package.model_dump()))
         return None
 
-    def message_confirm_and_ack_delete(self, _msg: str):
-        '''
-            Confirm the message and delete it from the stream
-        '''
-        self.redis_server.xack(self.receiving_channel, self.module_name, _msg)
-        self.redis_server.xdel(self.receiving_channel, _msg)
-        self.resolved += 1
-        self.verbose()
-
     def channel_subscribe(self, topics) -> PubSub:
         '''
         Subscribe to the specified channel

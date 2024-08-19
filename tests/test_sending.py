@@ -1,3 +1,6 @@
+"""
+Test sending messages, commands, and callbacks. Assert it with redis xrange.
+"""
 from schemas.schemas import CommandPackage
 from tests.conftest import get_stream_data
 

@@ -26,6 +26,11 @@ def message_data():
     return [CommandPackage(type="SHOOT", command="Information", data=json.dumps({"msg": f"No.{i} of test point"})) for i in range(100)]
 
 
+@pytest.fixture()
+def command_data():
+    return [CommandPackage(type="CONFIRM", command="Information", data=json.dumps({"msg": f"No.{i} of test point"})) for i in range(100)]
+
+
 def get_stream_data(redis_connection: redis.Redis, stream_name: str):
     _stream_data = redis_connection.xrange(name=stream_name)
     return [StreamData(item) for item in _stream_data]

@@ -37,6 +37,7 @@ class Streaming():
                  redis_port: int,
                  redis_db: int,
                  daemon: bool = False,
+                 debug: bool = False,
                  ) -> None:
         self.module_name = user_module
         self.module_uid = f"{user_module}_{os.getpid()}"
@@ -63,17 +64,9 @@ class Streaming():
         self.processed = 0
         self.owned_data = 0
         self.process_time = []
-
+        self.debug = debug
         self.time = int(time.time())
-        print(
-            f"\nDataQueue: {self.owned_data}\n"
-            f"\033[1G\033[2KProcessed Data: {self.processed}\n"
-            f"\033[1G\033[2KResolved Number: {self.resolved}\n"
-            f"\033[1G\033[2KListened Data: {self.listened}",
-            end="",
-            flush=True
-        )
-
+        self.verbose()
         self.__build_stream_thread(thread_name="StreamListening",
                                    consumer_group=self.module_name,
                                    consumer=self.module_uid,
@@ -169,7 +162,7 @@ class Streaming():
 
     def send_message(self, command: str, sending_channel: str = "", **kwargs) -> None:
         '''
-            Format the command package and send the message to the specified channel
+        Format the command package and send the message to the specified channel
         '''
         _package = CommandPackage(type="SHOOT", command=command, **kwargs)
         _sending_channel = sending_channel if sending_channel else self.stream_operator.stream_name
@@ -179,7 +172,7 @@ class Streaming():
 
     def send_command(self, command: str, sending_channel: str = "", **kwargs) -> None:
         '''
-            Format the command package and send the command to the specified channel
+        Format the command package and send the command to the specified channel
         '''
         _package = CommandPackage(type="CONFIRM", command=command, **kwargs)
         self.add_token(_package)
@@ -189,7 +182,7 @@ class Streaming():
 
     def send_callback(self, command: str, sending_channel: str, **kwargs) -> dict:
         '''
-            Format the command package and send the command to the specified channel
+        Format the command package and send the command to the specified channel
         '''
         _sending_channel = sending_channel if sending_channel else self.stream_operator.stream_name
         _package = CommandPackage(
@@ -212,9 +205,20 @@ class Streaming():
                 raise StreamingException("Token not found")
         return _return
 
+    def verbose(self):
+        if self.debug:
+            print(
+                f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n"
+                f"\033[1G\033[2KProcessed Data: {self.processed}\n"
+                f"\033[1G\033[2KResolved Number: {self.resolved}\n"
+                f"\033[1G\033[2KListened Data: {self.listened}",
+                end="",
+                flush=True
+            )
+
     def broadcast_message(self, command: str, **kwargs) -> None:
         '''
-            Broadcast the message to all the user_module
+        Broadcast the message to all the user_module
         '''
         _package = CommandPackage(type="BROADCAST", command=command, **kwargs)
         self.redis_server.publish(
@@ -228,18 +232,11 @@ class Streaming():
         self.redis_server.xack(self.receiving_channel, self.module_name, _msg)
         self.redis_server.xdel(self.receiving_channel, _msg)
         self.resolved += 1
-        print(
-            f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n"
-            f"\033[1G\033[2KProcessed Data: {self.processed}\n"
-            f"\033[1G\033[2KResolved Number: {self.resolved}\n"
-            f"\033[1G\033[2KListened Data: {self.listened}",
-            end="",
-            flush=True
-        )
+        self.verbose()
 
     def channel_subscribe(self, topics) -> PubSub:
         '''
-            Subscribe to the specified channel
+        Subscribe to the specified channel
         '''
         _redis_instance = self.redis_server.pubsub()
         _redis_instance.subscribe(topics)
@@ -247,19 +244,12 @@ class Streaming():
 
     def put_message_to_working_thread(self, data: dict) -> None:
         '''
-            Put the message to the working thread
+        Put the message to the working thread
         '''
         try:
             self.data_streaming.put(data)
             self.owned_data = self.data_streaming.qsize()
-            print(
-                f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n"
-                f"\033[1G\033[2KProcessed Data: {self.processed}\n"
-                f"\033[1G\033[2KResolved Number: {self.resolved}\n"
-                f"\033[1G\033[2KListened Data: {self.listened}",
-                end="",
-                flush=True
-            )
+            self.verbose()
         except TypeError:
             traceback.print_exc()
 
@@ -276,7 +266,7 @@ class Streaming():
 
     def read_data_in_stream(self, stream_id: str):
         '''
-            Read the data in the stream
+        Read the data in the stream
         '''
         data = self.redis_server.xrange(
             self.stream_operator.stream_name, min=stream_id, max=stream_id)
@@ -309,14 +299,7 @@ class Streaming():
                         self.redis_server.publish(
                             self.subscribe_topics, json.dumps(_data.model_dump()))
                     self.processed += 1
-                    print(
-                        f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n"
-                        f"\033[1G\033[2KProcessed Data: {self.processed}\n"
-                        f"\033[1G\033[2KResolved Number: {self.resolved}\n"
-                        f"\033[1G\033[2KListened Data: {self.listened}",
-                        end="",
-                        flush=True
-                    )
+                    self.verbose()
                 except Exception as e:
                     raise StreamingException(str(e)) from e
             data_queue.task_done()
@@ -328,14 +311,7 @@ class Streaming():
         for i in pubsub.listen():
             if i["type"] == "message":
                 self.listened += 1
-                print(
-                    f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n"
-                    f"\033[1G\033[2KProcessed Data: {self.processed}\n"
-                    f"\033[1G\033[2KResolved Number: {self.resolved}\n"
-                    f"\033[1G\033[2KListened Data: {self.listened}",
-                    end="",
-                    flush=True
-                )
+                self.verbose()
                 data = redis_subscribe_to_python(i)
                 _package = CommandPackage(**data)
                 # Only dealing with messages that are belong to itself
@@ -441,7 +417,7 @@ class Streaming():
 
     def __build_working_thread(self, thread_name: str, streaming_data: queue.Queue, daemon: bool):
         """
-            Builds a working thread for processing messages.
+        Builds a working thread for processing messages.
         """
         self.working_thread = RestartableThread(target=self.queuing_data_processing,
                                                 args=(streaming_data, ),
@@ -450,7 +426,7 @@ class Streaming():
 
     def __build_pubsub_thread(self, thread_name: str, daemon: bool):
         '''
-            Builds a pubsub thread for listening to the broadcast channel
+        Builds a pubsub thread for listening to the broadcast channel
         '''
         _instance = self.channel_subscribe(self.subscribe_topics)
         self.subpub_thread = RestartableThread(target=self.pubsub_listening,

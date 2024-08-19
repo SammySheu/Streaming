@@ -1,14 +1,6 @@
 import json
 
 
-def redis_subscribe_to_python(data):
-    '''
-    Customized function to convert redis subscribe data to python dictionary
-    '''
-    data = json.loads(data["data"].decode())
-    return data
-
-
 def redis_xrange_to_python(data):
     '''
     Customized function to convert redis xrange data to python dictionary

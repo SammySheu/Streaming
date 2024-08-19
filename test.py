@@ -7,7 +7,8 @@ cb = Streaming(
     user_module="Test",
     redis_host="127.0.0.1",
     redis_port=6379,
-    redis_db=0)
+    redis_db=0,
+    debug=True)
 tasks = []
 for _ in range(100):
     tasks.append(cb.send_callback(

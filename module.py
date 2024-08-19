@@ -14,13 +14,12 @@ from redis import ResponseError
 from redis.client import PubSub
 
 from schemas.schemas import (
-    CommandPackage, ConsumerInfo, GroupInfo, StreamInfo, GroupData)
+    CommandPackage, ConsumerInfo, GroupInfo, StreamInfo, GroupData, SubscribeData)
 from utils.multithread import RestartableThread
 from utils.encryption import Encryption
 from utils.exception import StreamingException
 from utils.stream_operate import StreamOperate
 from utils.convert_function import (
-    redis_subscribe_to_python,
     redis_xrange_to_python
 )
 
@@ -264,6 +263,12 @@ class Streaming():
             _result.append(CommandPackage(**_stream_data.values))
         return _result
 
+    def _convert_subscribe_data(self, data) -> SubscribeData:
+        '''
+        Convert the subscribe data to CommandPackage
+        '''
+        return SubscribeData(**data)
+
     def read_data_in_stream(self, stream_id: str):
         '''
         Read the data in the stream
@@ -306,26 +311,25 @@ class Streaming():
 
     def pubsub_listening(self, pubsub: PubSub):
         '''
-            Listen to the broadcast channel
+        Listen to the broadcast channel
         '''
         for i in pubsub.listen():
-            if i["type"] == "message":
+            _subscribe = self._convert_subscribe_data(i)
+            if _subscribe.type == "message":
                 self.listened += 1
                 self.verbose()
-                data = redis_subscribe_to_python(i)
-                _package = CommandPackage(**data)
                 # Only dealing with messages that are belong to itself
-                if _package.token in self.owned_token:
-                    if _package.type == "CALLBACK":
+                if _subscribe.data.token in self.owned_token:
+                    if _subscribe.data.type == "CALLBACK":
                         # Only put listened data into callback_queue if it is type of callback
                         self.callback_queue.put(
-                            (_package.token, _package.response))
+                            (_subscribe.data.token, _subscribe.data.response))
                     self.ack_and_delete_message(
-                        stream_name=_package.channel_name, group_name=self.module_name, ids={_package.entry_id})
+                        stream_name=_subscribe.data.channel_name, group_name=self.module_name, ids={_subscribe.data.channel_name.entry_id})
                 else:
-                    if _package.type == "BROADCAST":
+                    if _subscribe.data.type == "BROADCAST":
                         self.put_message_to_working_thread(
-                            _package.model_dump())
+                            _subscribe.data.model_dump())
 
     def ack_and_delete_message(self, stream_name: str, group_name: str, ids: set[str]):
         '''

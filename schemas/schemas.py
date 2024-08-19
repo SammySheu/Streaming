@@ -1,7 +1,8 @@
 from pydantic import BaseModel, field_validator, Field, model_validator
 from typing import Any
-from dataclasses import dataclass
+from dataclasses import dataclass, Field as DataField
 import json
+import orjson
 
 
 class CommandPackage(BaseModel):
@@ -69,3 +70,19 @@ class GroupData():
     def __init__(self, item: list):
         self.stream_name = item[0].decode()
         self.stream_datas = [StreamData(_pair) for _pair in item[1]]
+
+
+@dataclass
+class SubscribeData():
+    type: str
+    pattern: str | None
+    channel: str
+    data: Any | CommandPackage
+
+    def __post_init__(self):
+        if isinstance(self.data, bytes):
+            try:
+                self.data = CommandPackage(
+                    **orjson.loads(self.data))
+            except Exception:
+                pass

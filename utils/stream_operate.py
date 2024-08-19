@@ -32,7 +32,7 @@ class StreamOperate:
     def read_group_data(self, group_name: str, consumer_name: str, count: int, block: bool = False):
         return self.redis.xreadgroup(
             groupname=group_name, consumername=consumer_name,
-            streams={self.stream_name: ">"}, count=count, block=0 if block else None)
+            streams={self.stream_name: ">"}, count=count, block=block if block else 0)
 
     def add_data(self, data: dict, stream_name: str = ""):
         _stream_name = stream_name if stream_name else self.stream_name

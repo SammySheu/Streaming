@@ -15,7 +15,7 @@ from redis.client import PubSub
 
 from schemas.schemas import (
     CommandPackage, ConsumerInfo, GroupInfo, StreamInfo, GroupData, SubscribeData)
-from utils.multithread import RestartableThread
+from utils.thread_manager import ThreadManager
 from utils.encryption import Encryption
 from utils.exception import StreamingException
 from utils.stream_operate import StreamOperate
@@ -26,7 +26,11 @@ from utils.convert_function import (
 
 class Streaming():
     '''
-    channel_name == stream in redis
+    user_module: str - specify which module is using.
+        It is used to create a consumer group.
+    block: int - specify the block time for reading the stream,
+        processing from queue.Queue, and pubsub listening timeout.
+    debug: bool - specify whether to print the verbose information.
     '''
     command_function = {}
 
@@ -35,7 +39,7 @@ class Streaming():
                  redis_host: str,
                  redis_port: int,
                  redis_db: int,
-                 daemon: bool = False,
+                 block: int = 0,  # in seconds
                  debug: bool = False,
                  ) -> None:
         self.module_name = user_module
@@ -49,33 +53,27 @@ class Streaming():
         )
         self.redis_server = redis.Redis(
             host=redis_host, port=redis_port, db=redis_db)
-        self.count = 0
-        self.callback_total = 0
         self.callback_queue = queue.Queue()  # [(<token>, <data>)]
-        # self.callback_manager = dict()  # {<token>: <thread>}
+        self.stream_queue = queue.Queue()
         self.owned_token = set()
-        self.pid = os.getpid()
-        self.data_streaming = queue.Queue()
-        self.run_command: Callable = None
         self.subscribe_topics: str = "ResolvedChannel"
         self.listened = 0
         self.resolved = 0
         self.processed = 0
-        self.owned_data = 0
-        self.process_time = []
+        self.queued_data = 0
         self.debug = debug
-        self.time = int(time.time())
         self.verbose()
+        self.thread_manager = ThreadManager()
         self.__build_stream_thread(thread_name="StreamListening",
                                    consumer_group=self.module_name,
                                    consumer=self.module_uid,
                                    count=1,
-                                   block=True,
-                                   daemon=daemon)
+                                   block=block,
+                                   daemon=block != 0)
         self.__build_working_thread(
-            thread_name="QueuingDataProcessing", streaming_data=self.data_streaming, daemon=daemon)
+            thread_name="QueuingDataProcessing", daemon=block != 0)
         self.__build_pubsub_thread(
-            thread_name="BroadcastListening", daemon=daemon)
+            thread_name="BroadcastListening", daemon=block != 0)
         # self.__build_pending_thread(thread_name="PendingListProcessing")
         self.update_register_function()
 
@@ -207,7 +205,7 @@ class Streaming():
     def verbose(self):
         if self.debug:
             print(
-                f"\033[3A\033[1G\033[2KDataQueue: {self.owned_data}\n"
+                f"\033[3A\033[1G\033[2KDataQueue: {self.queued_data}\n"
                 f"\033[1G\033[2KProcessed Data: {self.processed}\n"
                 f"\033[1G\033[2KResolved Number: {self.resolved}\n"
                 f"\033[1G\033[2KListened Data: {self.listened}",
@@ -237,8 +235,8 @@ class Streaming():
         Put the message to the working thread
         '''
         try:
-            self.data_streaming.put(data)
-            self.owned_data = self.data_streaming.qsize()
+            self.stream_queue.put(data)
+            self.queued_data = self.stream_queue.qsize()
             self.verbose()
         except TypeError:
             traceback.print_exc()
@@ -271,14 +269,17 @@ class Streaming():
     def __register_class_method(self, _class):
         return {attribute: getattr(_class, attribute) for attribute in dir(_class) if callable(getattr(_class, attribute)) and attribute.startswith('__') is False and attribute.startswith('_') is False}
 
-    def queuing_data_processing(self, data_queue: queue.Queue):
+    def queuing_data_processing(self, stop_event):
         '''
-            Process the data in the queue
+        Process the data in the queue
         '''
-        while True:
-            _queuing_data: dict = data_queue.get()
+        while not stop_event.is_set():
+            try:
+                _queuing_data: dict = self.stream_queue.get(timeout=5)
+            except queue.Empty:
+                continue
             _data = CommandPackage(**_queuing_data)
-            self.owned_data = data_queue.qsize()
+            self.queued_data = self.stream_queue.qsize()
             if _data is not None:
                 # Decide whether data need to be executed(Store in self.command)
                 try:
@@ -289,7 +290,9 @@ class Streaming():
                         _data.data)
                     if _data.type == "SHOOT":
                         self.ack_and_delete_message(
-                            stream_name=_data.channel_name, group_name=self.module_name, ids={_data.entry_id})
+                            stream_name=_data.channel_name,
+                            group_name=self.module_name,
+                            ids={_data.entry_id})
                     elif _data.type == "CONFIRM" or _data.type == "CALLBACK":
                         _data.response = result
                         self.redis_server.publish(
@@ -298,29 +301,37 @@ class Streaming():
                     self.verbose()
                 except Exception as e:
                     raise StreamingException(str(e)) from e
-            data_queue.task_done()
+            self.stream_queue.task_done()
 
-    def pubsub_listening(self, pubsub: PubSub):
+    def pubsub_listening(self, stop_event, pubsub: PubSub):
         '''
         Listen to the broadcast channel
         '''
-        for i in pubsub.listen():
-            _subscribe = self._convert_subscribe_data(i)
-            if _subscribe.type == "message":
-                self.listened += 1
-                self.verbose()
-                # Only dealing with messages that are belong to itself
-                if _subscribe.data.token in self.owned_token:
-                    if _subscribe.data.type == "CALLBACK":
-                        # Only put listened data into callback_queue if it is type of callback
-                        self.callback_queue.put(
-                            (_subscribe.data.token, _subscribe.data.response))
-                    self.ack_and_delete_message(
-                        stream_name=_subscribe.data.channel_name, group_name=self.module_name, ids={_subscribe.data.channel_name.entry_id})
-                else:
-                    if _subscribe.data.type == "BROADCAST":
-                        self.put_message_to_working_thread(
-                            _subscribe.data.model_dump())
+        try:
+            while not stop_event.is_set():
+                i = pubsub.get_message(timeout=5)
+                if i is None:
+                    continue
+                _subscribe = self._convert_subscribe_data(i)
+                if _subscribe.type == "message":
+                    self.listened += 1
+                    self.verbose()
+                    # Only dealing with messages that are belong to itself
+                    if _subscribe.data.token in self.owned_token:
+                        if _subscribe.data.type == "CALLBACK":
+                            # Only put listened data into callback_queue if it is type of callback
+                            self.callback_queue.put(
+                                (_subscribe.data.token, _subscribe.data.response))
+                        self.ack_and_delete_message(
+                            stream_name=_subscribe.data.channel_name, group_name=self.module_name, ids={_subscribe.data.entry_id})
+                        self.resolved += 1
+                        self.verbose()
+                    else:
+                        if _subscribe.data.type == "BROADCAST":
+                            self.put_message_to_working_thread(
+                                _subscribe.data.model_dump())
+        except Exception as e:
+            print(e)
 
     def ack_and_delete_message(self, stream_name: str, group_name: str, ids: set[str]):
         '''
@@ -375,11 +386,11 @@ class Streaming():
             self.message_autoclaim_to_master(master=master_id)
             # time.sleep(5)
 
-    def stream_listening(self, consumer_group: str, consumer: str, count: int, block: bool = False):
+    def stream_listening(self, stop_event, consumer_group: str, consumer: str, count: int, block: bool = False):
         '''
             Listen to the stream
         '''
-        while True:
+        while not stop_event.is_set():
             data = self.stream_operator.read_group_data(
                 group_name=consumer_group,
                 consumer_name=consumer,
@@ -387,9 +398,9 @@ class Streaming():
                 block=block)
             if data:
                 result: list[CommandPackage] = self._convert_group_data(data)
-                for _d in result:
-                    self.put_message_to_working_thread(_d.model_dump())
-            self.data_streaming.join()
+                for _cmd_pkg in result:
+                    self.put_message_to_working_thread(_cmd_pkg.model_dump())
+            self.stream_queue.join()
 
     def __build_stream_thread(
         self,
@@ -397,43 +408,48 @@ class Streaming():
         consumer_group: str,
         consumer: str,
         count: int,
-        block: bool,
+        block: int,
         daemon: bool
     ):
         """
-            Builds a stream thread for listening to messages.
+        Builds a stream thread for listening to messages.
         """
         # Once get the message, back to the starting point to read message
-        self.main_thread = RestartableThread(target=self.stream_listening,
-                                             args=(consumer_group,
-                                                   consumer, count, block),
-                                             name=thread_name, daemon=daemon)
-        self.main_thread.start()
+        self.thread_manager.add_thread(target_func=self.stream_listening, args=(
+            consumer_group, consumer, count, block*1000), name=thread_name, daemon=daemon)
+        # self.main_thread = RestartableThread(target=self.stream_listening,
+        #                                      args=(consumer_group,
+        #                                            consumer, count, block),
+        #                                      name=thread_name, daemon=daemon)
+        # self.main_thread.start()
 
-    def __build_working_thread(self, thread_name: str, streaming_data: queue.Queue, daemon: bool):
+    def __build_working_thread(self, thread_name: str, daemon: bool):
         """
-        Builds a working thread for processing messages.
+        Builds a working thread for processing(executing) messages.
         """
-        self.working_thread = RestartableThread(target=self.queuing_data_processing,
-                                                args=(streaming_data, ),
-                                                name=thread_name, daemon=daemon)
-        self.working_thread.start()
+        self.thread_manager.add_thread(target_func=self.queuing_data_processing,
+                                       name=thread_name,
+                                       daemon=daemon)
 
     def __build_pubsub_thread(self, thread_name: str, daemon: bool):
         '''
         Builds a pubsub thread for listening to the broadcast channel
         '''
         _instance = self.channel_subscribe(self.subscribe_topics)
-        self.subpub_thread = RestartableThread(target=self.pubsub_listening,
-                                               args=(_instance, ),
-                                               name=thread_name,
-                                               daemon=daemon)
-        self.subpub_thread.start()
+        self.thread_manager.add_thread(target_func=self.pubsub_listening,
+                                       args=(_instance, ),
+                                       name=thread_name,
+                                       daemon=daemon)
 
     def __build_pending_thread(self, thread_name: str):
-        self.pending_thread = RestartableThread(target=self.pending_list_processing,
-                                                name=thread_name)
-        self.pending_thread.start()
+        self.thread_manager.add_thread(target_func=self.pending_list_processing,
+                                       name=thread_name)
+
+    def exit(self):
+        self.thread_manager.exit()
+
+    def __del__(self):
+        self.exit()
 
 
 print(id(Streaming))

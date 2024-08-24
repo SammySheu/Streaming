@@ -16,7 +16,8 @@ def redis_connection():
 
 
 @pytest.fixture()
-def stream_module():
+def stream_module(redis_connection):
+    redis_connection.delete("PytestServer")
     stream = Streaming(user_module="Pytest", redis_host="localhost",
                        redis_port=6379, redis_db=0, block=5)
     yield stream
@@ -36,6 +37,11 @@ def command_data():
 @pytest.fixture()
 def callback_data():
     return [CommandPackage(type="CALLBACK", command="Information", data=json.dumps({"msg": f"No.{i} of test point"})) for i in range(100)]
+
+
+@pytest.fixture()
+def broadcast_data():
+    return [CommandPackage(type="BROADCAST", command="Information", data=json.dumps({"msg": f"No.{i} of test point"})) for i in range(100)]
 
 
 def get_stream_data(redis_connection: redis.Redis, stream_name: str):

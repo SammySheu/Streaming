@@ -20,10 +20,10 @@ def test_send_message(stream_module, redis_connection, message_data: list[Comman
     assert len(stream_data) == len(message_data)
 
 
-def test_send_command(stream_module, redis_connection, message_data: list[CommandPackage]):
+def test_send_command(stream_module, redis_connection, command_data: list[CommandPackage]):
     test_channel = "TestChannel"
     redis_connection.delete(test_channel)
-    for _package in message_data:
+    for _package in command_data:
         stream_module.send_command(
             sending_channel=test_channel, command=_package.command, data=_package.data)
     # Get data from redis stream directly
@@ -33,13 +33,13 @@ def test_send_command(stream_module, redis_connection, message_data: list[Comman
         assert _stream_data.values.get("type") == "CONFIRM"
         assert _stream_data.values.get("token") != ""
     # Make sure number of sending times and length of message data are equal
-    assert len(stream_data) == len(message_data)
+    assert len(stream_data) == len(command_data)
 
 
-def test_send_callback(stream_module, redis_connection, message_data: list[CommandPackage]):
+def test_send_callback(stream_module, redis_connection, callback_data: list[CommandPackage]):
     test_channel = "TestChannel"
     redis_connection.delete(test_channel)
-    for _package in message_data:
+    for _package in callback_data:
         stream_module.send_callback(
             sending_channel=test_channel, command=_package.command, data=_package.data)
     # Get data from redis stream directly
@@ -49,4 +49,21 @@ def test_send_callback(stream_module, redis_connection, message_data: list[Comma
         assert _stream_data.values.get("type") == "CALLBACK"
         assert _stream_data.values.get("token") != ""
     # Make sure number of sending times and length of message data are equal
-    assert len(stream_data) == len(message_data)
+    assert len(stream_data) == len(callback_data)
+
+
+def test_send_broadcast(stream_module, redis_connection, broadcast_data: list[CommandPackage]):
+    test_channel = "ResolvedChannel"
+    # redis_connection.delete(test_channel)
+    for _package in broadcast_data:
+        stream_module.broadcast_message(
+            sending_channel=test_channel, command=_package.command, data=_package.data)
+    # Get data from redis stream directly
+    # stream_data = get_stream_data(
+    #     redis_connection, stream_name=test_channel)
+    # for _stream_data in stream_data:
+    #     assert _stream_data.values.get("type") == "CONFIRM"
+    #     assert _stream_data.values.get("token") != ""
+    # Make sure number of sending times and length of message data are equal
+    assert stream_module.listened == len(broadcast_data)
+    assert stream_module.processed == len(broadcast_data)

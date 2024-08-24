@@ -6,22 +6,18 @@ import os
 import time
 import json
 import queue
-import traceback
+import sys
 from typing import Callable
 
 import redis
-from redis import ResponseError
 from redis.client import PubSub
 
 from schemas.schemas import (
-    CommandPackage, ConsumerInfo, GroupInfo, StreamInfo, GroupData, SubscribeData)
+    CommandPackage, ConsumerInfo, GroupInfo, StreamInfo, GroupData, SubscribeData, PendingInfo, StreamData, PendingData)
 from utils.thread_manager import ThreadManager
 from utils.encryption import Encryption
 from utils.exception import StreamingException
 from utils.stream_operate import StreamOperate
-from utils.convert_function import (
-    redis_xrange_to_python
-)
 
 
 class Streaming():
@@ -44,11 +40,12 @@ class Streaming():
                  ) -> None:
         self.module_name = user_module
         self.module_uid = f"{user_module}_{os.getpid()}"
+        self.channel = f"{user_module}Server"
         self.stream_operator = StreamOperate(
             redis_host=redis_host,
             redis_port=redis_port,
             redis_db=redis_db,
-            stream_name=f"{user_module}Server",
+            stream_name=self.channel,
             consumer_group=user_module
         )
         self.redis_server = redis.Redis(
@@ -62,7 +59,7 @@ class Streaming():
         self.processed = 0
         self.queued_data = 0
         self.debug = debug
-        self.verbose()
+        self.__verbose()
         self.thread_manager = ThreadManager()
         self.__build_stream_thread(thread_name="StreamListening",
                                    consumer_group=self.module_name,
@@ -74,7 +71,7 @@ class Streaming():
             thread_name="QueuingDataProcessing", daemon=block != 0)
         self.__build_pubsub_thread(
             thread_name="BroadcastListening", daemon=block != 0)
-        # self.__build_pending_thread(thread_name="PendingListProcessing")
+        self.__build_pending_thread(thread_name="PendingListProcessing")
         self.update_register_function()
 
     @classmethod
@@ -88,70 +85,83 @@ class Streaming():
     def update_register_function(self):
         Streaming.command_function.update(self.__register_class_method(self))
 
-    def __look_up_stream(self, channel: str) -> None:
-        try:
-            _info = self.redis_server.xinfo_stream(name=channel)
-            StreamInfo(**_info)
-        except ResponseError as e:
-            print(e)
-            self.redis_server.xgroup_create(
-                name=channel,
-                groupname=self.module_name,
-                mkstream=True)
+    def __look_up_stream(self) -> StreamInfo:
+        return StreamInfo(**self.stream_operator.stream_info())
 
-    def __look_up_group(self, channel: str) -> dict[str, GroupInfo]:
-        try:
-            _groups = self.redis_server.xinfo_groups(name=channel)
-        except ResponseError:
-            return {}
-        return {_g["name"].decode(): GroupInfo(**_g) for _g in _groups}
+    def __look_up_group(self) -> dict[str, GroupInfo]:
+        return {_g["name"].decode(): GroupInfo(**_g) for _g in self.stream_operator.group_info()}
 
-    def __look_up_consumers(self, channel: str) -> dict[str, ConsumerInfo]:
-        """
-        Return info of consumers
-        """
-        consumers = self.redis_server.xinfo_consumers(
-            name=channel, groupname=self.module_name)
-        return {_c["name"].decode(): ConsumerInfo(**_c) for _c in consumers}
+    def __look_up_consumers(self) -> dict[str, ConsumerInfo]:
+        return {
+            _c["name"].decode(): ConsumerInfo(**_c)
+            for _c in self.stream_operator.consumer_info(group_name=self.module_name)
+        }
 
-    def __elect_master(self, info: dict[str, ConsumerInfo]) -> str:
+    def __look_up_pending(self, group: str) -> PendingInfo:
+        _pending_info = self.stream_operator.pending_info(group_name=group)
+        _pending_info["consumers"] = self.stream_operator.consumer_info(
+            group_name=group)
+        return PendingInfo(**_pending_info)
+
+    def __elect_master(self, idle_time_less_than: int = sys.maxsize) -> str:
         """
-        Using info of consumers to elect master
+        Elect master if idle time is less than the specified time.
         """
-        master, current = self.module_uid, info[self.module_uid].pending
-        if current == 0:
-            return master
-        for _name, _info in info.items():
-            if _info.pending == 0:
-                return _name
-            elif _info.pending < current:
-                master, current = _name, _info.pending
+        consumers = self.__look_up_consumers()
+        if consumers[self.module_uid].pending == 0 and consumers[self.module_uid].idle < idle_time_less_than:
+            return self.module_uid
+        master, cur = self.module_uid, sys.maxsize
+        for _consumer_info in consumers.values():
+            if _consumer_info.idle < idle_time_less_than:
+                if _consumer_info.pending == 0:
+                    return _consumer_info.name
+                elif _consumer_info.pending < cur:
+                    master, cur = _consumer_info.name, _consumer_info.pending
         return master
 
-    def __delete_inactive_consumers(
-        self,
-        consumers_info: dict[str, ConsumerInfo],
-        dead_time: int = 60000
-    ) -> dict[str, ConsumerInfo]:
-        _to_delete = set()
-        for _consumer, _info in consumers_info.items():
-            if _info.idle > dead_time:
-                self.redis_server.xgroup_delconsumer(
-                    name=self.stream_operator.stream_name,
-                    groupname=self.module_name,
-                    consumername=_consumer
-                )
-                _to_delete.add(_consumer)
-        for _t in _to_delete:
-            del consumers_info[_t]
+    def __elect_master_and_claim_data(self, data: list[PendingData], min_idle_time: int = sys.maxsize):
+        _master = self.__elect_master(idle_time_less_than=min_idle_time)
+        self.__claim_pending_data(
+            pending_data=data, consumer_name=_master, min_idle_time=min_idle_time)
 
-    def message_autoclaim_to_master(self, master: str, idle_time: int = 60000):
+    def __claim_pending_data(self, pending_data: list[PendingData], consumer_name: str, min_idle_time: int):
+        self.stream_operator.claim_data(self.module_name, consumer_name=consumer_name,
+                                        min_idle_time=min_idle_time, ids=[
+                                            _p.message_id for _p in pending_data])
+
+    def batch_claim_data_to_master(self, batch: int, min_idle_time: int) -> set[str]:
+        pending_data = [PendingData(**_data) for _data in self.stream_operator.pending_range(
+            group_name=self.module_name, count=10000, idle=min_idle_time)]
+        if pending_data:
+            i = 0
+            while i+batch < len(pending_data):
+                self.__elect_master_and_claim_data(
+                    data=pending_data[i:i+batch], min_idle_time=min_idle_time)
+                i += batch
+            self.__elect_master_and_claim_data(
+                data=pending_data[i:], min_idle_time=min_idle_time)
+
+    def delete_inactive_consumers(
+        self,
+        dead_time: int
+    ) -> dict[str, ConsumerInfo]:
+        del_consumers = set()
+        for _name, _info in self.__look_up_consumers().items():
+            if _info.idle > dead_time:
+                del_consumers.add(_name)
+        if del_consumers:
+            # Only batch claim pending data if there are inactive consumers
+            self.batch_claim_data_to_master(batch=5, min_idle_time=dead_time)
+            for _consumer in del_consumers:
+                self.stream_operator.delete_consumer(
+                    group_name=self.module_name, consumer_name=_consumer)
+
+    def message_autoclaim_to_master(self, master: str, min_idle_time: int = 10000, count: int = 1):
         """
         Auto-claim messages to master if idle time surpassed
         """
-        res = self.redis_server.xautoclaim(
-            name=self.channel["recieving"], groupname=self.module_name, consumername=master, min_idle_time=idle_time)
-        # print(res)
+        self.stream_operator.autoclaim_data(
+            group_name=self.module_name, consumer_name=master, min_idle_time=min_idle_time, count=count)
 
     def add_token(self, _cmd_pkg: CommandPackage):
         _cmd_pkg.token = Encryption.build_token()
@@ -162,7 +172,7 @@ class Streaming():
         Format the command package and send the message to the specified channel
         '''
         _package = CommandPackage(type="SHOOT", command=command, **kwargs)
-        _sending_channel = sending_channel if sending_channel else self.stream_operator.stream_name
+        _sending_channel = sending_channel if sending_channel else self.channel
         self.stream_operator.add_data(
             stream_name=_sending_channel, data=_package.model_dump())
         return None
@@ -173,7 +183,7 @@ class Streaming():
         '''
         _package = CommandPackage(type="CONFIRM", command=command, **kwargs)
         self.add_token(_package)
-        _sending_channel = sending_channel if sending_channel else self.stream_operator.stream_name
+        _sending_channel = sending_channel if sending_channel else self.channel
         self.stream_operator.add_data(
             stream_name=_sending_channel, data=_package.model_dump())
 
@@ -181,7 +191,7 @@ class Streaming():
         '''
         Format the command package and send the command to the specified channel
         '''
-        _sending_channel = sending_channel if sending_channel else self.stream_operator.stream_name
+        _sending_channel = sending_channel if sending_channel else self.channel
         _package = CommandPackage(
             type="CALLBACK", command=command, channel_name=_sending_channel, **kwargs)
         self.add_token(_package)
@@ -202,7 +212,7 @@ class Streaming():
                 raise StreamingException("Token not found")
         return _return
 
-    def verbose(self):
+    def __verbose(self):
         if self.debug:
             print(
                 f"\033[3A\033[1G\033[2KDataQueue: {self.queued_data}\n"
@@ -237,9 +247,10 @@ class Streaming():
         try:
             self.stream_queue.put(data)
             self.queued_data = self.stream_queue.qsize()
-            self.verbose()
-        except TypeError:
-            traceback.print_exc()
+            self.__verbose()
+        except TypeError as e:
+            print(e)
+            # traceback.print_exc()
 
     def _convert_group_data(self, data) -> list[CommandPackage]:
         '''
@@ -252,19 +263,19 @@ class Streaming():
             _result.append(CommandPackage(**_stream_data.values))
         return _result
 
+    def _convert_range_data(self, data) -> list[CommandPackage]:
+        _result = []
+        stream_data = [StreamData(_d) for _d in data]
+        for _stream_data in stream_data:
+            _stream_data.values["entry_id"] = _stream_data.key
+            _result.append(CommandPackage(**_stream_data.values))
+        return _result
+
     def _convert_subscribe_data(self, data) -> SubscribeData:
         '''
         Convert the subscribe data to CommandPackage
         '''
         return SubscribeData(**data)
-
-    def read_data_in_stream(self, stream_id: str):
-        '''
-        Read the data in the stream
-        '''
-        data = self.redis_server.xrange(
-            self.stream_operator.stream_name, min=stream_id, max=stream_id)
-        return redis_xrange_to_python(data)
 
     def __register_class_method(self, _class):
         return {attribute: getattr(_class, attribute) for attribute in dir(_class) if callable(getattr(_class, attribute)) and attribute.startswith('__') is False and attribute.startswith('_') is False}
@@ -289,6 +300,7 @@ class Streaming():
                     result = self.command_function[_data.command](
                         _data.data)
                     if _data.type == "SHOOT":
+                        # pass
                         self.ack_and_delete_message(
                             stream_name=_data.channel_name,
                             group_name=self.module_name,
@@ -298,9 +310,10 @@ class Streaming():
                         self.redis_server.publish(
                             self.subscribe_topics, json.dumps(_data.model_dump()))
                     self.processed += 1
-                    self.verbose()
+                    self.__verbose()
                 except Exception as e:
-                    raise StreamingException(str(e)) from e
+                    pass
+                    # raise StreamingException(str(e)) from e
             self.stream_queue.task_done()
 
     def pubsub_listening(self, stop_event, pubsub: PubSub):
@@ -315,7 +328,7 @@ class Streaming():
                 _subscribe = self._convert_subscribe_data(i)
                 if _subscribe.type == "message":
                     self.listened += 1
-                    self.verbose()
+                    self.__verbose()
                     # Only dealing with messages that are belong to itself
                     if _subscribe.data.token in self.owned_token:
                         if _subscribe.data.type == "CALLBACK":
@@ -325,7 +338,7 @@ class Streaming():
                         self.ack_and_delete_message(
                             stream_name=_subscribe.data.channel_name, group_name=self.module_name, ids={_subscribe.data.entry_id})
                         self.resolved += 1
-                        self.verbose()
+                        self.__verbose()
                     else:
                         if _subscribe.data.type == "BROADCAST":
                             self.put_message_to_working_thread(
@@ -342,53 +355,33 @@ class Streaming():
         self.stream_operator.del_data(
             stream_name=stream_name, ids=ids)
 
-    def pending_list_processing(self):
+    def pending_list_processing(self, _stop_event):
         '''
-            Process the pending list
+        Process the pending list
         '''
-        while True:
-            info = self.__look_up_consumers(
-                channel=self.stream_operator.stream_name)
-            self.__delete_inactive_consumers(consumers_info=info)
-            # Choose master which has the minimum pending messages
-            # print(info)
-            master_id = self.__elect_master(info)
-            # Process self's pending list
-            pending_list = self.redis_server.xpending_range(
-                name=self.stream_operator.stream_name,
-                groupname=self.module_name,
-                consumername=self.module_uid,
-                min="-",
-                max="+",
-                count=1000)
-            self.redis_server.xpending(
-                name=self.stream_operator.stream_name, groupname=self.module_name)
-            # print(f"PEL:{len(pending_list)} myself={self.workerID} master={master_id}")
-            for _p_info in pending_list:
-                # Only dealing with messages that are belong to itself and stay there surpass 3 seconds
-                if _p_info["time_since_delivered"] > 3000:
-                    data = self.read_data_in_stream(
-                        _p_info["message_id"].decode())
-                    # self.command_function[data["command"]](json.loads(data["data"]))
-                    try:
-                        for _d in data:
-                            _d["entry_id"] = _p_info["message_id"].decode()
-                            _d["token"] = Encryption.build_token()
-                            self.owned_token.add(_d["token"])
-                            # self.command_function[_d["command"]](json.loads(_d["data"]))
-                            self.put_message_to_working_thread(_d)
-                            # self.exec_cmd(cmd_package_list=data)
-                            # print("data_received_from_queue")
-                    except Exception:
-                        pass
+        while not _stop_event.is_set():
 
-            # claim other messages if idle time is greater than 5 seconds and not belong to itself
-            self.message_autoclaim_to_master(master=master_id)
-            # time.sleep(5)
+            # Process self's pending list
+            pending_list = self.stream_operator.pending_range(
+                group_name=self.module_name, count=1000, consumer_name=self.module_uid, idle=5000)
+            _range_data = []
+            for _p_info in pending_list:
+                _range_data.extend(self.stream_operator.read_data_by_id(
+                    _id=_p_info["message_id"].decode()))
+            if _range_data:
+                result: list[CommandPackage] = self._convert_range_data(
+                    _range_data)
+                for _cmd_pkg in result:
+                    self.put_message_to_working_thread(_cmd_pkg.model_dump())
+                    self.stream_queue.join()
+
+            # delete inactive consumers and claim pending data to the other worker
+            self.delete_inactive_consumers(dead_time=60000)
+            time.sleep(5)
 
     def stream_listening(self, stop_event, consumer_group: str, consumer: str, count: int, block: bool = False):
         '''
-            Listen to the stream
+        Listen to the stream
         '''
         while not stop_event.is_set():
             data = self.stream_operator.read_group_data(
@@ -417,11 +410,6 @@ class Streaming():
         # Once get the message, back to the starting point to read message
         self.thread_manager.add_thread(target_func=self.stream_listening, args=(
             consumer_group, consumer, count, block*1000), name=thread_name, daemon=daemon)
-        # self.main_thread = RestartableThread(target=self.stream_listening,
-        #                                      args=(consumer_group,
-        #                                            consumer, count, block),
-        #                                      name=thread_name, daemon=daemon)
-        # self.main_thread.start()
 
     def __build_working_thread(self, thread_name: str, daemon: bool):
         """
@@ -452,18 +440,28 @@ class Streaming():
         self.exit()
 
 
-print(id(Streaming))
+@ Streaming.cmd_register
+def Information(tmp):
+    return f"Information: {tmp}"
+
+
+@ Streaming.cmd_register
+def CPU_intensive_task(data: dict):
+    start = time.time()
+
+    def fibonacci(n):
+        if n <= 1:
+            return n
+        else:
+            return fibonacci(n-1) + fibonacci(n-2)
+    result = fibonacci(data.get("fibonacci_number"))
+    return time.time() - start
+
+
 if __name__ == "__main__":
-    from utils.test_function import TestClass
-    from module import Streaming
-    # print(id(Streaming))
-    TestClass()
-    cb = Streaming(
-        user_module="Sammy",
-        redis_host="127.0.0.1",
-        redis_port=6379,
-        redis_db=0
-    )
-    cb.broadcast_message(command="exec_time_cmd",
-                         data=json.dumps({"hello": "world", "timesleep": 1}))
-    time.sleep(3600)
+    cb = Streaming(user_module="Sammy", redis_host="localhost",
+                   redis_port=6379, redis_db=0, block=5, debug=True)
+    [cb.send_command(sending_channel="SammyServer", command="Information",
+                     data=json.dumps({"msg": "Hello"})) for _ in range(100)]
+    while True:
+        time.sleep(3600)

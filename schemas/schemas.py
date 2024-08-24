@@ -15,29 +15,6 @@ class CommandPackage(BaseModel):
     response: Any = ""
 
 
-class StreamInfo(BaseModel):
-    length: int
-    groups: int
-    first_entry: str | None = Field(alias="first-entry")
-    last_entry: str | None = Field(alias="last-entry")
-
-    @field_validator("first_entry", "last_entry", mode='before')
-    @classmethod
-    def convert_first_entry(cls, value):
-        return value[0].decode() if value else ""
-
-
-class GroupInfo(BaseModel):
-    consumers: int
-    pending: int
-
-
-class ConsumerInfo(BaseModel):
-    pending: int
-    idle: int
-    inactive: int
-
-
 @dataclass
 class StreamData():
     key: str
@@ -60,6 +37,57 @@ class StreamData():
                 return json.loads(data)
             except json.JSONDecodeError:
                 return data
+
+
+class StreamInfo(BaseModel):
+    length: int
+    groups: int
+    first_entry: StreamData | None = Field(alias="first-entry")
+    last_entry: StreamData | None = Field(alias="last-entry")
+
+    @field_validator("first_entry", "last_entry", mode='before')
+    @classmethod
+    def convert_first_entry(cls, value):
+        return StreamData(value) if value else None
+
+
+class GroupInfo(BaseModel):
+    name: str
+    consumers: int
+    pending: int
+    last_delivered_id: str | None = Field(alias="last-delivered-id")
+    entries_read: str | None = Field(alias="entries-read")
+
+    @field_validator("name", "last_delivered_id", "entries_read", mode='before')
+    @classmethod
+    def convert_value(cls, value):
+        '''
+        Convert bytes to string
+        '''
+        return value.decode() if value else None
+
+
+class ConsumerInfo(BaseModel):
+    name: str
+    pending: int
+    idle: int = -1
+    inactive: int = -1
+
+    @field_validator("name", mode='before')
+    def convert_name(cls, value):
+        return value.decode()
+
+
+class PendingInfo(BaseModel):
+    pending: int
+    min: str | None
+    max: str | None
+    consumers: list[ConsumerInfo]
+
+    @field_validator("min", "max", mode='before')
+    def convert_min_max(cls, value):
+        if value:
+            return value.decode()
 
 
 @dataclass
@@ -86,3 +114,14 @@ class SubscribeData():
                     **orjson.loads(self.data))
             except Exception:
                 pass
+
+
+class PendingData(BaseModel):
+    message_id: str
+    consumer: str
+    time_since_delivered: int
+    times_delivered: int
+
+    @field_validator("message_id", "consumer", mode='before')
+    def convert_value(cls, value):
+        return value.decode() if value else None

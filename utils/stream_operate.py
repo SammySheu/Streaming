@@ -23,16 +23,27 @@ class StreamOperate:
         return self.redis.xinfo_consumers(name=self.stream_name, groupname=group_name)
 
     def create_group(self, group_name: str):
-        return self.redis.xgroup_create(name=self.stream_name, groupname=group_name, mkstream=True)
+        # This will create a consumer group at the beginning of the stream
+        # no matter what the stream is empty or not
+        return self.redis.xgroup_create(name=self.stream_name, groupname=group_name, id="0", mkstream=True)
 
     def delete_consumer(self, group_name: str, consumer_name: str):
         return self.redis.xgroup_delconsumer(
             name=self.stream_name, groupname=group_name, consumername=consumer_name)
 
-    def read_group_data(self, group_name: str, consumer_name: str, count: int, block: bool = False):
+    def read_data(self, count: int, _id: str = ">", block: bool = False):
+        return self.redis.xread({self.stream_name: _id}, count=count, block=block if block else 0)
+
+    def read_data_by_range(self, start: str, end: str, count: int):
+        return self.redis.xrange(name=self.stream_name, start=start, end=end, count=count)
+
+    def read_data_by_id(self, _id: str):
+        return self.redis.xrange(name=self.stream_name, min=_id, max=_id)
+
+    def read_group_data(self, group_name: str, consumer_name: str, count: int, _id: str = ">", block: bool = False):
         return self.redis.xreadgroup(
             groupname=group_name, consumername=consumer_name,
-            streams={self.stream_name: ">"}, count=count, block=block if block else 0)
+            streams={self.stream_name: _id}, count=count, block=block if block else 0)
 
     def add_data(self, data: dict, stream_name: str = ""):
         _stream_name = stream_name if stream_name else self.stream_name
@@ -46,7 +57,22 @@ class StreamOperate:
         _stream_name = stream_name if stream_name else self.stream_name
         return self.redis.xdel(_stream_name, *ids)
 
-    def autoclaim_data(self, group_name: str, consumer_name: str, idle_time: int):
+    def claim_data(self, group_name: str, consumer_name: str, min_idle_time: int, ids: list[str]):
+        return self.redis.xclaim(
+            name=self.stream_name, groupname=group_name,
+            consumername=consumer_name, min_idle_time=min_idle_time, message_ids=ids)
+
+    def autoclaim_data(self, group_name: str, consumer_name: str, min_idle_time: int, count: int):
         return self.redis.xautoclaim(
             name=self.stream_name, groupname=group_name,
-            consumername=consumer_name, min_idle_time=idle_time)
+            consumername=consumer_name, min_idle_time=min_idle_time, count=count)
+
+    def pending_info(self, group_name: str):
+        return self.redis.xpending(self.stream_name, group_name)
+
+    def pending_range(self, group_name: str, count: int,
+                      consumer_name: str | None = None,
+                      idle: int | None = None,
+                      start: str = "-", end: str = "+"):
+        return self.redis.xpending_range(self.stream_name, group_name,
+                                         start, end, count, consumer_name, idle)

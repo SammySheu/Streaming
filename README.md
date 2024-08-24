@@ -12,3 +12,10 @@
 3. 目前設定一次抓一筆資料且阻塞（count=1 & queue.join() & queue.task_done()）
     * 好處：任務會平均分散給各個worker
     * 壞處：每拿一筆就佔網路I/O，沒有batch功能
+    * 此設定可避免一次拿太多任務且無法消化
+4. worker閒置超過60秒會被群組踢掉，其底下的pending_data會平均claim到其他worker
+5. 發送訊息: 可選擇四種模式
+   * send_message: 單純發送訊息，不做後續處理
+   * send_command: 發送命令且對方確認後，做ack&delete
+   * send_callback: 發送回呼函數，須經對方傳回response才ack&delete
+   * broadcast: 經由pubsub發送一次性 request, 不做後續處理
